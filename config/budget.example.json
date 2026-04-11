@@ -1,0 +1,55 @@
+{
+  "$comment": "Copy this file to budget.json and customize. budget.json is gitignored so your paths stay local.",
+
+  "paused": false,
+  "dry_run": true,
+
+  "monthly": {
+    "resets_on_day": 1,
+    "target_burn_pct_per_day": 2.5,
+    "reserve_floor_pct": 15,
+    "trigger_headroom_pct": 5
+  },
+
+  "weekly": {
+    "rolling_days": 7,
+    "reserve_floor_pct": 20,
+    "trigger_headroom_pct": 5,
+    "is_floor": true
+  },
+
+  "max_opportunistic_pct_per_run": 1.0,
+  "max_runs_per_day": 8,
+
+  "activity_gate": {
+    "idle_minutes_required": 20,
+    "no_fixed_hours": true
+  },
+
+  "estimator": "transcripts",
+  "estimator_notes": "Parses ~/.claude/projects/**/*.jsonl for real Anthropic usage fields. Reserve floor is the real safety net — 2x estimator error still leaves reserve intact.",
+
+  "token_weights": {
+    "input_tokens": 1.0,
+    "output_tokens": 5.0,
+    "cache_creation_input_tokens": 1.25,
+    "cache_read_input_tokens": 0.1
+  },
+
+  "projects_in_rotation": [
+    {
+      "slug": "example-project",
+      "path": "REPLACE_WITH_ABSOLUTE_PATH_TO_YOUR_PROJECT",
+      "clinical_gate": false,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"]
+    }
+  ],
+
+  "commit_policy": "local-auto-branch-only",
+  "branch_prefix": "auto/",
+
+  "kill_switches": {
+    "pause_file": "./config/PAUSED",
+    "notes": "Create empty file at pause_file path OR set paused:true above to halt dispatcher immediately. Either works."
+  }
+}

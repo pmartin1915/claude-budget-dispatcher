@@ -1,0 +1,20 @@
+node_modules/
+*.log
+.DS_Store
+
+# Local, user-specific config — users copy budget.example.json → budget.json
+config/budget.json
+config/PAUSED
+
+# Runtime state — regenerated on every run
+status/usage-estimate.json
+status/budget-dispatch-log.jsonl
+status/budget-dispatch-last-run.json
+
+# Keep status/ as a directory in git
+!status/.gitkeep
+
+# Editor junk
+.vscode/
+.idea/
+*.swp
