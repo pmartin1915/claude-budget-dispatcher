@@ -176,11 +176,12 @@ See `scripts/estimate-usage.mjs` comments for the full math.
 
 ## Caveats and known limitations
 
-1. **Not an absolute quota API.** This is a relative pace detector. If Anthropic ever publishes a real quota endpoint, swap in `estimator: "admin-api"` mode (not yet implemented — see `HANDOFF.md`).
-2. **Bootstrap depends on trailing history.** If you've used Claude Code for less than 30 days, the baseline is weak. The reserve floor still protects you.
-3. **Windows-first but cross-platform-safe.** Paths and scheduler examples use Windows conventions. The estimator script itself is fully portable (tested via `homedir()` and `path.resolve`). cron/launchd users need to adapt the scheduler step.
-4. **Dispatcher prompt is a template, not a binary.** The Claude prompt in `tasks/budget-dispatch.md` is pasted into Claude Code Desktop's scheduler by hand. A true headless runner would need to invoke `claude -p` with this prompt — that works but requires your own shell wrapper.
-5. **Never tested in production.** This ships in dry-run mode by default for a reason. See `HANDOFF.md` for the validation plan.
+1. **Not an absolute quota API.** This is a relative pace detector. If Anthropic ever publishes a real quota endpoint, swap in `estimator: "admin-api"` mode (not yet implemented — see `docs/HANDOFF-2026-04-11.md`).
+2. **Bootstrap depends on trailing history.** If you've used Claude Code for less than a few days, the baseline is too weak to anchor `cost_per_pct_point` — the estimator will fail closed with `skip_reason: "insufficient-history-for-bootstrap"` until enough usage accumulates. The reserve floor continues to protect you during this period.
+3. **Pro-cyclical baseline is inherent.** Because the baseline is trailing-30-day, it shrinks after a vacation (making the dispatcher more conservative for weeks afterward) and grows after a crunch week (making it more permissive). This is a feature of relative pace detection, not a bug — but expect the dispatcher's behavior to "remember" your last month. The reserve floor still catches runaway cases.
+4. **Windows-first, fully portable.** The estimator and the new `scripts/check-idle.mjs` activity gate are both plain Node and work identically on Windows / macOS / Linux. Earlier versions of the dispatcher prompt had GNU-date assumptions in the activity gate that silently no-opped on Windows/macOS; that has been replaced by the portable Node checker. cron/launchd users still need to adapt the *scheduler* registration step.
+5. **Dispatcher prompt is a template, not a binary.** The Claude prompt in `tasks/budget-dispatch.md` is pasted into Claude Code Desktop's scheduler by hand. A true headless runner would need to invoke `claude -p` with this prompt — that works but requires your own shell wrapper.
+6. **Never tested in production.** This ships in dry-run mode by default for a reason. See `docs/HANDOFF-2026-04-11.md` for the full pre-live audit trail.
 
 ---
 
@@ -194,7 +195,7 @@ This is extracted from a personal framework (`combo`) used for multi-project orc
 - Better project/task ranking heuristics
 - Test suite for the estimator
 
-See [HANDOFF.md](HANDOFF.md) for the list of things explicitly needing polish and second-look review.
+See [docs/HANDOFF-2026-04-11.md](docs/HANDOFF-2026-04-11.md) for the original cross-model audit trail and the fix list that shipped in v0.1.0-pre-live.
 
 ---
 
