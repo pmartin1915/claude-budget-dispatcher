@@ -18,3 +18,7 @@ status/budget-dispatch-last-run.json
 .vscode/
 .idea/
 *.swp
+
+# Headless runner log directory (keep dir, ignore contents)
+status/dispatcher-runs/*
+!status/dispatcher-runs/.gitkeep
