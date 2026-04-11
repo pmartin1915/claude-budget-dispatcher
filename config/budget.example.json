@@ -27,6 +27,34 @@
     "no_fixed_hours": true
   },
 
+  "$comment_free_model_roster": "Maps task classes to free-tier models reached via PAL MCP. When a task matches a class with a non-null model, the dispatcher skips the Claude Code Task-tool subagent entirely and calls mcp__pal__<tool> directly — zero Claude Max tokens for the work itself. Only the thin orchestration layer uses Claude. Roster verified against PAL listmodels on 2026-04-11. NEVER add gemini-3-pro-preview — it bills separate Google Cloud credits, not free.",
+  "free_model_roster": {
+    "enabled": true,
+    "classes": {
+      "explore":   "gemini-2.5-pro",
+      "audit":     "gemini-2.5-pro",
+      "research":  "gemini-2.5-pro",
+      "tests_gen": "codestral-latest",
+      "refactor":  "codestral-latest",
+      "docs_gen":  "mistral-large-latest"
+    },
+    "claude_only": [
+      "plan", "design", "architecture",
+      "clinical", "security", "safety"
+    ],
+    "forbidden_models": [
+      "gemini-3-pro-preview",
+      "google/gemini-3-pro-preview"
+    ],
+    "fallback_chain": [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "mistral-large-latest"
+    ],
+    "on_pal_error": "skip",
+    "$comment_on_pal_error": "skip (safest: log and move on) OR claude_fallback (run on Claude Max with warning, burns sub usage)"
+  },
+
   "estimator": "transcripts",
   "estimator_notes": "Parses ~/.claude/projects/**/*.jsonl for real Anthropic usage fields. Reserve floor is the real safety net — 2x estimator error still leaves reserve intact.",
 

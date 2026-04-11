@@ -77,6 +77,52 @@ Pick ONE project. Record its slug and absolute path.
 4. Also read the project's state file if one exists (e.g., `ai/STATE.md`) —
    if any "What's Next" bullet matches a pre-approved keyword, prefer that.
 
+## Step 5.5 — Select delegation target (free-model routing)
+
+The goal of this step is to decide whether the task runs on **Claude Max**
+(expensive) or on a **free-tier model via PAL MCP** (zero Claude Max cost).
+Free-model routing is the single biggest lever for stretching Claude Max
+subscription headroom.
+
+1. Read `free_model_roster` from `<REPO_ROOT>/config/budget.json`.
+   If `free_model_roster.enabled != true`, skip this step — everything
+   runs on Claude Max like before. Record `delegate_to: "claude"` and
+   continue to Step 6.
+2. Read the chosen project's DISPATCH.md Pre-Approved Tasks table. If the
+   row for the chosen task has a `Delegate To` column, use that value as
+   `task_class`. Otherwise infer `task_class` from the task keyword:
+   - `test`, `typecheck`, `lint` → **claude** (verification, needs local
+     toolchain)
+   - `audit` → `audit` class
+   - `add-tests`, `tests-gen` → `tests_gen` class
+   - `refactor`, `clean` → `refactor` class
+   - `docs`, `jsdoc`, `readme`, `changelog` → `docs_gen` class
+   - `explore`, `summarize`, `trace` → `explore` class
+   - `research` → `research` class
+   - `plan`, `design`, `architecture` → **claude-only** (never delegate)
+3. If `task_class` is in `free_model_roster.claude_only`, record
+   `delegate_to: "claude"` and continue to Step 6.
+4. If the project has `clinical_gate: true` and the task touches any
+   safety-critical path (`domain/`, `src/data/`, `src/calculators/`),
+   **force `delegate_to: "claude"`** regardless of the roster — clinical
+   and content-safety logic is never delegated.
+5. Otherwise, look up `free_model_roster.classes[task_class]`. If it
+   resolves to a model name, record `delegate_to: "<model>"`. If null or
+   missing, record `delegate_to: "claude"`.
+6. **Forbidden-model check:** if the resolved model is in
+   `free_model_roster.forbidden_models` (e.g. `gemini-3-pro-preview`),
+   REFUSE the delegation — log `outcome: "error"` with reason
+   `forbidden-model-in-roster` and exit. This guards against config drift.
+7. **PAL health check:** before routing to a free model, attempt a cheap
+   `mcp__pal__version` call. If PAL is unreachable:
+   - If `on_pal_error == "skip"`: log `outcome: "skipped"` with reason
+     `pal-unreachable` and exit (fail closed, no Claude Max cost).
+   - If `on_pal_error == "claude_fallback"`: record `delegate_to: "claude"`
+     with a warning in the run log that Claude Max is being used as
+     fallback, and continue to Step 6.
+
+Record the final `delegate_to` decision. It drives Step 6's branch.
+
 ## Step 6 — Dispatch with hard bounds
 
 1. Create a worktree-isolated branch (H2: seconds-resolution timestamp to
@@ -96,36 +142,84 @@ Pick ONE project. Record its slug and absolute path.
    Record `ORIGIN_URL` — it will be restored in Step 7 so the completed
    branch is still reachable from the main checkout for manual review.
 
-3. Use the Task tool with `subagent_type: "general-purpose"` to run the bounded
-   work. Pass this prompt to the subagent, filled in:
+3. **Branch on `delegate_to` from Step 5.5:**
 
-   > You are the opportunistic worker. Perform exactly the task `<TASK>` on
-   > project `<PROJECT>` per its DISPATCH.md Pre-Approved Tasks row. Budget:
-   > max 40 tool calls, max 30 minutes wall clock.
-   >
-   > **Path constraint (H1 defense-in-depth):** Do NOT edit any file outside
-   > `<PROJECT_PATH>/**`. If the task requires editing a file not under this
-   > path, STOP and report `outcome: "invalid-path"` with the offending path.
-   > Do not attempt relative paths (`../`) that resolve outside the project.
-   >
-   > Do NOT push. Do NOT merge. Do NOT run deploy, publish, tauri:build, or
-   > any task marked `Requires Confirmation`. (The remote has also been
-   > unset at the git layer — any push attempt will error out.)
-   >
-   > After making changes:
-   > 1. Run the project's test command. If any regression vs baseline → STOP
-   >    and report "reverted".
-   > 2. Run the project's typecheck command. If regression → STOP and report
-   >    "reverted".
-   > 3. If this project has `clinical_gate: true` and you touched any domain/
-   >    file → run `pal codereview` on the changed files. Any Critical finding
-   >    → STOP and report "reverted".
-   > 4. On success, stage and commit with message prefix `[opportunistic]`.
-   >
-   > Return a structured JSON report: {outcome, files_changed, tests_after,
-   > typecheck_clean, audit_result, commit_hash, tokens_estimated}.
+### Branch A — `delegate_to == "claude"` (Claude Max subagent, high cost)
 
-4. Receive the subagent's report.
+Use the Task tool with `subagent_type: "general-purpose"` to run the bounded
+work. Pass this prompt to the subagent, filled in:
+
+> You are the opportunistic worker. Perform exactly the task `<TASK>` on
+> project `<PROJECT>` per its DISPATCH.md Pre-Approved Tasks row. Budget:
+> max 40 tool calls, max 30 minutes wall clock.
+>
+> **Path constraint (H1 defense-in-depth):** Do NOT edit any file outside
+> `<PROJECT_PATH>/**`. If the task requires editing a file not under this
+> path, STOP and report `outcome: "invalid-path"` with the offending path.
+> Do not attempt relative paths (`../`) that resolve outside the project.
+>
+> Do NOT push. Do NOT merge. Do NOT run deploy, publish, tauri:build, or
+> any task marked `Requires Confirmation`. (The remote has also been
+> unset at the git layer — any push attempt will error out.)
+>
+> **Delegation preference:** for any sub-task that involves reading files
+> you will not edit, summarizing code, generating tests, or drafting docs,
+> use `mcp__pal__chat` with model `gemini-2.5-pro` (or `codestral-latest`
+> for code-gen, `mistral-large-latest` for prose) via `absolute_file_paths`
+> rather than Reading files directly. Free-tier delegation saves Claude Max
+> tokens inside the session even when the top-level task is Claude-owned.
+>
+> After making changes:
+> 1. Run the project's test command. If any regression vs baseline → STOP
+>    and report "reverted".
+> 2. Run the project's typecheck command. If regression → STOP and report
+>    "reverted".
+> 3. If this project has `clinical_gate: true` and you touched any domain/
+>    file → run `pal codereview` on the changed files via `gemini-2.5-pro`.
+>    Any Critical finding → STOP and report "reverted".
+> 4. On success, stage and commit with message prefix `[opportunistic]`.
+>
+> Return a structured JSON report: {outcome, files_changed, tests_after,
+> typecheck_clean, audit_result, commit_hash, tokens_estimated,
+> pal_delegations_used}.
+
+### Branch B — `delegate_to == "<free-model>"` (PAL direct, zero Claude Max cost)
+
+Do **NOT** spawn a Task-tool subagent. Instead, call the appropriate PAL
+tool directly from the dispatcher:
+
+- **`audit` class:** call `mcp__pal__codereview` with `model: "<delegate_to>"`,
+  `relevant_files` set to the project's source directory files. Capture
+  the findings JSON.
+- **`explore` / `research` class:** call `mcp__pal__chat` with
+  `model: "<delegate_to>"`, `absolute_file_paths` set to the files the task
+  targets, and a prompt from the DISPATCH.md task description. Capture the
+  response as the artifact.
+- **`tests_gen` / `refactor` / `docs_gen` class:** call `mcp__pal__chat`
+  with `model: "<delegate_to>"`, prompt describing the transform, and
+  `working_directory_absolute_path` set to the worktree. Parse the model's
+  response into file contents and write them via the Write tool.
+
+After the PAL call:
+
+1. **Verification gate (same as Branch A):** run the project's test command
+   if the PAL output touched testable files. If regression → revert.
+2. Run typecheck if any source file changed. If regression → revert.
+3. Clinical gate if applicable.
+4. On success, stage and commit with message prefix
+   `[opportunistic][pal:<model>]` so the commit trail records which free
+   model produced the work. Example:
+   `[opportunistic][pal:codestral-latest] tests-gen: add vitest specs for parkland.ts`
+5. Report `{outcome, files_changed, delegated_to: "<model>", pal_tokens_estimated, commit_hash}`.
+
+**Important cost property of Branch B:** the dispatcher itself (this prompt)
+is still running on Claude Max, so the orchestration tokens are not free.
+But the actual work — reading files, generating code, writing prose — is
+100% on the free-tier model. For a typical 30-minute delegated run, this
+cuts the Claude Max cost by ~80% vs Branch A. The remaining 20% is the
+dispatcher deciding what to do and validating the result.
+
+4. Receive the work result (from Branch A subagent or Branch B PAL call).
 
 ## Step 7 — Verify and commit (or revert)
 
