@@ -129,18 +129,31 @@ Pick ONE project. Record its slug and absolute path.
 
 ## Step 7 — Verify and commit (or revert)
 
-1. If subagent reports "reverted" → `git worktree remove --force ../auto-...`
-   and `git branch -D auto/...`. Log `outcome: "reverted"` with reason.
-2. If success → DO NOT push. DO NOT merge. The branch stays local for manual
-   review.
-3. **Restore origin** so the branch is reachable from the main checkout:
+**IMPORTANT — ALWAYS run Step 7.0 (restore origin) before anything else in
+Step 7, regardless of how the subagent finished.** This is the H1 ceremony
+finalizer. If the subagent crashed, errored, or was killed, the worktree is
+left with `origin` unset; restoring is mandatory for operator cleanup. Wrap
+the remainder of Step 7 mentally as a try/finally: the restore runs even on
+error paths.
+
+0. **Restore origin (always):**
    ```
    if [ -n "$ORIGIN_URL" ]; then
-     git remote add origin "$ORIGIN_URL"
+     git remote add origin "$ORIGIN_URL" 2>/dev/null || true
    fi
    ```
    (Perry will still need to explicitly `git push` to send anything to the
-   remote — the auto-branch commit policy is local-only.)
+   remote — the auto-branch commit policy is local-only. Restoring the
+   remote URL only makes the branch reachable from the main checkout for
+   manual review.)
+
+1. If subagent reports "reverted" → `git worktree remove --force ../auto-...`
+   and `git branch -D auto/...`. Log `outcome: "reverted"` with reason.
+2. If subagent reports "error" / crashed / timed out → log
+   `outcome: "error"` with the error message. Leave the worktree in place
+   for manual inspection.
+3. If success → DO NOT push. DO NOT merge. The branch stays local for manual
+   review.
 3. Optionally append a line to the project's state/journal file under a
    section called `## Opportunistic Runs` (create if missing), format:
    `- <date> [<task>] auto/<branch> — <one-line summary>`

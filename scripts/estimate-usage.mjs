@@ -133,10 +133,17 @@ function monthlyPeriodStart(now, resetsOnDay) {
   const d = new Date(now);
   d.setUTCHours(0, 0, 0, 0);
   if (d.getUTCDate() >= resetsOnDay) {
-    d.setUTCDate(resetsOnDay);
+    // Period started this month. Clamp to last day if requested reset day
+    // exceeds this month's length (e.g. resetsOnDay=31 in April).
+    const lastDayThis = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    d.setUTCDate(Math.min(resetsOnDay, lastDayThis));
   } else {
+    // Period started last month. Walk to day 1 first so setUTCMonth doesn't
+    // overflow forward when the previous month is shorter (Feb → 31).
+    d.setUTCDate(1);
     d.setUTCMonth(d.getUTCMonth() - 1);
-    d.setUTCDate(resetsOnDay);
+    const lastDayPrev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    d.setUTCDate(Math.min(resetsOnDay, lastDayPrev));
   }
   return d.getTime();
 }
