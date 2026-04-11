@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Headless wrapper for the Budget Dispatcher. Invokes `claude -p` with the
+  Headless wrapper for the Budget Dispatcher. Invokes claude -p with the
   dispatcher prompt, captures output, handles retries, logs everything.
 
 .DESCRIPTION
@@ -15,12 +15,17 @@
 
   Pipeline:
     Phase 1: node scripts/estimate-usage.mjs          (free, Node-only)
-             → if dispatch_authorized = false, exit 0 (no Claude cost)
+             -> if dispatch_authorized = false, exit 0 (no Claude cost)
     Phase 2: node scripts/check-idle.mjs 20           (free, Node-only)
-             → if user-active, exit 0 (no Claude cost)
+             -> if user-active, exit 0 (no Claude cost)
     Phase 3: claude -p < tasks/budget-dispatch.md     (Claude Max invoked)
-             → with retry on transient errors, hard timeout
+             -> with retry on transient errors, hard timeout
     Phase 4: append run summary to status/budget-dispatch-log.jsonl
+
+  NOTE: This file is pure ASCII. PowerShell 5.1 reads .ps1 files as
+  Windows-1252 by default; non-ASCII characters (em-dash, smart quotes)
+  will mangle the parser. Do not add Unicode characters to this file
+  without saving as UTF-8 with BOM.
 
 .PARAMETER RepoRoot
   Absolute path to the claude-budget-dispatcher repo root.
@@ -29,22 +34,18 @@
   Max retry attempts on transient errors. Default: 2.
 
 .PARAMETER TimeoutMinutes
-  Hard wall-clock timeout for a single `claude -p` invocation. Default: 45.
+  Hard wall-clock timeout for a single claude -p invocation. Default: 45.
 
 .PARAMETER ClaudePath
   Absolute path to the claude binary. If omitted, resolved via PATH.
   Task Scheduler's environment may not include the user PATH, so explicit
   is safer.
 
-.PARAMETER DryRunOverride
-  If set to $true, forces the dispatcher to run in dry-run mode regardless
-  of config. Useful for first-time testing.
-
 .EXAMPLE
   .\run-dispatcher.ps1 -RepoRoot "C:\Users\perry\DevProjects\claude-budget-dispatcher"
 
 .EXAMPLE
-  .\run-dispatcher.ps1 -RepoRoot "C:\Users\perry\DevProjects\dev-ops" -ClaudePath "C:\Users\perry\AppData\Local\Anthropic\claude.exe"
+  .\run-dispatcher.ps1 -RepoRoot "C:\Users\perry\DevProjects\dev-ops" -ClaudePath "C:\Users\perry\.local\bin\claude.exe"
 #>
 
 [CmdletBinding()]
@@ -56,9 +57,7 @@ param(
 
   [int]$TimeoutMinutes = 45,
 
-  [string]$ClaudePath = '',
-
-  [switch]$DryRunOverride
+  [string]$ClaudePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,14 +80,25 @@ if (-not (Test-Path $LogDir)) {
 
 $timestamp = $StartTime.ToString('yyyyMMdd-HHmmss')
 $LogFile = Join-Path $LogDir "$timestamp-$RunId.log"
+$DispatcherLog = Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl'
 
 function Write-Log {
   param([string]$msg, [string]$level = 'info')
   $line = "[$((Get-Date).ToString('HH:mm:ss.fff'))] [$level] $msg"
   Add-Content -Path $LogFile -Value $line
-  if ($level -in @('error', 'warn')) {
+  if ($level -eq 'error' -or $level -eq 'warn') {
     Write-Host $line
   }
+}
+
+function Write-Jsonl {
+  param([hashtable]$obj)
+  $json = $obj | ConvertTo-Json -Compress
+  Add-Content -Path $DispatcherLog -Value $json
+}
+
+function Get-DurationSec {
+  return [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
 }
 
 Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes"
@@ -112,8 +122,6 @@ if (-not $ClaudePath) {
 }
 
 # ---- Phase 1: estimator pre-check ----
-# Run the Node estimator first. If it reports not-authorized, don't even
-# invoke claude -p. This is the free no-op path.
 Write-Log "phase 1: running estimate-usage.mjs"
 $estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
 $estimatorOutput = & node $estimatorScript 2>&1
@@ -124,31 +132,28 @@ foreach ($line in $estimatorOutput) {
 }
 
 if ($estimatorExit -ne 0) {
-  Write-Log "estimator failed — fail closed" 'error'
+  Write-Log "estimator failed, fail closed" 'error'
   exit 2
 }
 
 $snapshotPath = Join-Path $RepoRoot 'status\usage-estimate.json'
 if (-not (Test-Path $snapshotPath)) {
-  Write-Log "estimator ran but no snapshot written — fail closed" 'error'
+  Write-Log "estimator ran but no snapshot written, fail closed" 'error'
   exit 2
 }
 
 $snapshot = Get-Content $snapshotPath -Raw | ConvertFrom-Json
 if (-not $snapshot.dispatch_authorized) {
-  Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason) — no-op, exit 0"
+  Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason), no-op exit 0"
 
-  # Log the skip to the dispatcher log for audit trail
-  $skipEntry = @{
+  Write-Jsonl @{
     ts = (Get-Date).ToString('o')
     run_id = $RunId
     outcome = 'skipped'
     reason = $snapshot.skip_reason
     phase = 'estimator-gate'
-    wrapper_duration_sec = [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
-  } | ConvertTo-Json -Compress
-  $dispatcherLog = Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl'
-  Add-Content -Path $dispatcherLog -Value $skipEntry
+    wrapper_duration_sec = Get-DurationSec
+  }
 
   exit 0
 }
@@ -162,24 +167,33 @@ Write-Log "check-idle exit=$idleExit output=$idleOutput"
 
 if ($idleExit -eq 1) {
   Write-Log "user-active, skipping"
-  $skipEntry = @{
+  Write-Jsonl @{
     ts = (Get-Date).ToString('o')
     run_id = $RunId
     outcome = 'skipped'
     reason = 'user-active'
     phase = 'activity-gate'
-    wrapper_duration_sec = [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
-  } | ConvertTo-Json -Compress
-  $dispatcherLog = Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl'
-  Add-Content -Path $dispatcherLog -Value $skipEntry
+    wrapper_duration_sec = Get-DurationSec
+  }
   exit 0
-} elseif ($idleExit -eq 2) {
-  Write-Log "idle check errored — fail closed" 'error'
+}
+
+if ($idleExit -eq 2) {
+  Write-Log "idle check errored, fail closed" 'error'
   exit 2
 }
 
 # ---- Phase 3: claude -p invocation with retry ----
+# Uses temp files for stdin/stdout/stderr redirection via Start-Process.
+# This is simpler and more robust than async event handlers on PS 5.1.
 Write-Log "phase 3: invoking claude -p"
+
+$stdinTemp = Join-Path $LogDir "$timestamp-$RunId.stdin.tmp"
+$stdoutTemp = Join-Path $LogDir "$timestamp-$RunId.stdout.tmp"
+$stderrTemp = Join-Path $LogDir "$timestamp-$RunId.stderr.tmp"
+
+# Pre-write the prompt to the stdin temp file
+Copy-Item -Path $PromptFile -Destination $stdinTemp -Force
 
 $attempt = 0
 $success = $false
@@ -187,109 +201,92 @@ $finalClaudeExit = -1
 
 while (-not $success -and $attempt -le $MaxRetries) {
   $attempt++
-  Write-Log "attempt $attempt/$($MaxRetries + 1)"
+  Write-Log "attempt $attempt of $($MaxRetries + 1)"
+
+  $procError = $null
+  $procExited = $false
+  $proc = $null
 
   try {
-    # Build the invocation. claude -p takes the prompt via stdin.
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $ClaudePath
-    $psi.Arguments = '-p'
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.WorkingDirectory = $RepoRoot
+    $proc = Start-Process -FilePath $ClaudePath `
+      -ArgumentList '-p' `
+      -RedirectStandardInput $stdinTemp `
+      -RedirectStandardOutput $stdoutTemp `
+      -RedirectStandardError $stderrTemp `
+      -NoNewWindow `
+      -PassThru `
+      -WorkingDirectory $RepoRoot
+  } catch {
+    $procError = $_
+    Write-Log "failed to start claude: $procError" 'error'
+  }
 
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-
-    # Async output capture to avoid deadlock on large outputs
-    $stdoutBuilder = New-Object System.Text.StringBuilder
-    $stderrBuilder = New-Object System.Text.StringBuilder
-    $stdoutHandler = {
-      if ($EventArgs.Data) {
-        [void]$Event.MessageData.AppendLine($EventArgs.Data)
-      }
-    }
-    $null = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived `
-      -Action $stdoutHandler -MessageData $stdoutBuilder
-    $null = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived `
-      -Action $stdoutHandler -MessageData $stderrBuilder
-
-    $proc.Start() | Out-Null
-    $proc.BeginOutputReadLine()
-    $proc.BeginErrorReadLine()
-
-    # Feed the prompt via stdin
-    $promptText = Get-Content $PromptFile -Raw
-    $proc.StandardInput.WriteLine($promptText)
-    $proc.StandardInput.Close()
-
-    # Wait with timeout
+  if ($null -ne $proc) {
     $timeoutMs = $TimeoutMinutes * 60 * 1000
-    if (-not $proc.WaitForExit($timeoutMs)) {
-      Write-Log "HARD TIMEOUT after $TimeoutMinutes min — killing process" 'error'
-      try { $proc.Kill() } catch { }
-      $proc.WaitForExit(5000)
+    $procExited = $proc.WaitForExit($timeoutMs)
 
-      $timeoutEntry = @{
+    if (-not $procExited) {
+      Write-Log "HARD TIMEOUT after $TimeoutMinutes min, killing process" 'error'
+      try { $proc.Kill() } catch { $null = $_ }
+      $null = $proc.WaitForExit(5000)
+
+      Write-Jsonl @{
         ts = (Get-Date).ToString('o')
         run_id = $RunId
         outcome = 'error'
         reason = 'hard-timeout'
         timeout_minutes = $TimeoutMinutes
         phase = 'claude-p'
-        wrapper_duration_sec = [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
-      } | ConvertTo-Json -Compress
-      Add-Content -Path (Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl') -Value $timeoutEntry
+        wrapper_duration_sec = Get-DurationSec
+      }
 
+      Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
       exit 3
     }
 
     $finalClaudeExit = $proc.ExitCode
-    Get-EventSubscriber | Unregister-Event
-
-    $stdout = $stdoutBuilder.ToString()
-    $stderr = $stderrBuilder.ToString()
-
     Write-Log "claude exit=$finalClaudeExit"
+
+    # Read captured output into the log file
     Add-Content -Path $LogFile -Value "---STDOUT---"
-    Add-Content -Path $LogFile -Value $stdout
+    if (Test-Path $stdoutTemp) {
+      $stdoutContent = Get-Content $stdoutTemp -Raw -ErrorAction SilentlyContinue
+      if ($stdoutContent) { Add-Content -Path $LogFile -Value $stdoutContent }
+    }
     Add-Content -Path $LogFile -Value "---STDERR---"
-    Add-Content -Path $LogFile -Value $stderr
+    if (Test-Path $stderrTemp) {
+      $stderrContent = Get-Content $stderrTemp -Raw -ErrorAction SilentlyContinue
+      if ($stderrContent) { Add-Content -Path $LogFile -Value $stderrContent }
+    }
 
     if ($finalClaudeExit -eq 0) {
       $success = $true
       Write-Log "claude -p succeeded on attempt $attempt"
-    } elseif ($finalClaudeExit -in @(1, 2)) {
-      # These are config/setup errors — do NOT retry
-      Write-Log "claude -p returned exit=$finalClaudeExit (non-retryable) — fail closed" 'error'
+    } elseif ($finalClaudeExit -eq 1 -or $finalClaudeExit -eq 2) {
+      Write-Log "claude -p returned exit=$finalClaudeExit (non-retryable), fail closed" 'error'
 
-      $errorEntry = @{
+      Write-Jsonl @{
         ts = (Get-Date).ToString('o')
         run_id = $RunId
         outcome = 'error'
         reason = "claude-exit-$finalClaudeExit"
         phase = 'claude-p'
         attempts = $attempt
-        wrapper_duration_sec = [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
-      } | ConvertTo-Json -Compress
-      Add-Content -Path (Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl') -Value $errorEntry
+        wrapper_duration_sec = Get-DurationSec
+      }
 
+      Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
       exit 2
     } else {
-      # Everything else is potentially transient (network, rate limit)
       Write-Log "claude -p returned exit=$finalClaudeExit (retryable)" 'warn'
       if ($attempt -le $MaxRetries) {
-        $backoffSec = [Math]::Pow(2, $attempt) * 5  # 10s, 20s, 40s
+        $backoffSec = [Math]::Pow(2, $attempt) * 5
         Write-Log "backoff $backoffSec sec before retry"
         Start-Sleep -Seconds $backoffSec
       }
     }
-  } catch {
-    Write-Log "exception during claude -p: $_" 'error'
-    Get-EventSubscriber | Unregister-Event -ErrorAction SilentlyContinue
+  } else {
+    # Start-Process failed
     if ($attempt -le $MaxRetries) {
       $backoffSec = [Math]::Pow(2, $attempt) * 5
       Start-Sleep -Seconds $backoffSec
@@ -297,10 +294,13 @@ while (-not $success -and $attempt -le $MaxRetries) {
   }
 }
 
-if (-not $success) {
-  Write-Log "all retries exhausted — fail closed" 'error'
+# Cleanup temp files
+Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
 
-  $exhaustedEntry = @{
+if (-not $success) {
+  Write-Log "all retries exhausted, fail closed" 'error'
+
+  Write-Jsonl @{
     ts = (Get-Date).ToString('o')
     run_id = $RunId
     outcome = 'error'
@@ -308,30 +308,24 @@ if (-not $success) {
     phase = 'claude-p'
     attempts = $attempt
     last_claude_exit = $finalClaudeExit
-    wrapper_duration_sec = [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
-  } | ConvertTo-Json -Compress
-  Add-Content -Path (Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl') -Value $exhaustedEntry
+    wrapper_duration_sec = Get-DurationSec
+  }
 
   exit 1
 }
 
 # ---- Phase 4: log the run ----
-$endTime = Get-Date
-$durationSec = ($endTime - $StartTime).TotalSeconds
+$durationSec = Get-DurationSec
 Write-Log "run complete duration=${durationSec}s run_id=$RunId"
 
-# Append a single-line summary to the dispatcher log
-$summary = @{
-  ts = $endTime.ToString('o')
+Write-Jsonl @{
+  ts = (Get-Date).ToString('o')
   run_id = $RunId
   outcome = 'wrapper-success'
   phase = 'complete'
   attempts = $attempt
-  wrapper_duration_sec = [math]::Round($durationSec, 1)
+  wrapper_duration_sec = $durationSec
   log_file = $LogFile
-} | ConvertTo-Json -Compress
-
-$dispatcherLog = Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl'
-Add-Content -Path $dispatcherLog -Value $summary
+}
 
 exit 0
