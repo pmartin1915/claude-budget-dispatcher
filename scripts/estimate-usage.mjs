@@ -174,6 +174,12 @@ function daysInMonthContaining(ts) {
 // afternoon of light Claude Code usage.
 const MIN_HISTORY_COST = 100;
 
+// Minimum calendar span (days) of transcript history before the trailing-30
+// baseline is trusted. Even if total cost exceeds MIN_HISTORY_COST, the math
+// assumes trailing30 represents ~30 days. If it represents hours, the
+// percentages collapse into geometric constants. See DECISIONS.md G4 entry.
+const MIN_HISTORY_DAYS = 7;
+
 function buildSnapshot(config, fileStats) {
   const now = Date.now();
   const weights = config.token_weights;
@@ -204,6 +210,7 @@ function buildSnapshot(config, fileStats) {
   let monthlyCost = 0;
   let weeklyCost = 0;
   let trailing30 = 0;
+  let oldestEntry = Infinity;
 
   const monthStart = monthlyPeriodStart(now, config.monthly.resets_on_day);
   const weekStart = now - config.weekly.rolling_days * 86400_000;
@@ -213,6 +220,7 @@ function buildSnapshot(config, fileStats) {
     if (when >= thirtyStart) trailing30 += cost;
     if (when >= monthStart) monthlyCost += cost;
     if (when >= weekStart) weeklyCost += cost;
+    if (when < oldestEntry) oldestEntry = when;
   }
 
   // C1: fail closed on cold start. Without a trailing-30-day baseline the
@@ -250,6 +258,52 @@ function buildSnapshot(config, fileStats) {
         trailing_30day_cost: round(trailing30, 0),
         cost_per_pct_point: null,
         min_history_cost: MIN_HISTORY_COST,
+        method: "trailing-30-anchored-to-target-rate"
+      }
+    };
+  }
+
+  // G4: fail closed on short history span. Even if total cost exceeds
+  // MIN_HISTORY_COST, the bootstrap math assumes trailing30 represents ~30
+  // days of observed usage. When it represents only hours (fresh install with
+  // one heavy session), costPerPctPoint collapses and downstream percentages
+  // become geometric constants (~75% monthly, ~428% weekly). Perry's PC
+  // deployment on 2026-04-11 is the concrete failure case.
+  const historySpanDays = oldestEntry === Infinity
+    ? 0
+    : Math.max(0, (now - oldestEntry) / 86_400_000);
+  if (historySpanDays < MIN_HISTORY_DAYS) {
+    const paused = config.paused === true || existsSync(PAUSE_FILE);
+    return {
+      generated_at: new Date(now).toISOString(),
+      paused,
+      dispatch_authorized: false,
+      skip_reason: "insufficient-history-span",
+      monthly: {
+        period_start: new Date(monthStart).toISOString(),
+        cost_weighted_units: round(monthlyCost, 0),
+        actual_pct: null,
+        expected_pct_at_pace: null,
+        headroom_pct: null,
+        reserve_ok: false,
+        gate_passes: false
+      },
+      weekly: {
+        window_start: new Date(weekStart).toISOString(),
+        rolling_days: config.weekly.rolling_days,
+        cost_weighted_units: round(weeklyCost, 0),
+        actual_pct: null,
+        expected_pct_at_pace: null,
+        headroom_pct: null,
+        reserve_ok: false,
+        gate_passes: false,
+        is_floor: true
+      },
+      bootstrap: {
+        trailing_30day_cost: round(trailing30, 0),
+        cost_per_pct_point: null,
+        history_span_days: round(historySpanDays, 1),
+        min_history_days: MIN_HISTORY_DAYS,
         method: "trailing-30-anchored-to-target-rate"
       }
     };
