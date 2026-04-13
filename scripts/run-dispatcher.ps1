@@ -103,6 +103,31 @@ function Get-DurationSec {
 
 Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes"
 
+# ---- PID-file mutex (G9 fix) ----
+# Prevents concurrent dispatcher runs (Task Scheduler overlap, manual + scheduled).
+$StatusDir = Join-Path $RepoRoot 'status'
+$lockFile = Join-Path $StatusDir "dispatcher.lock"
+if (Test-Path $lockFile) {
+  $lockPid = [int](Get-Content $lockFile -ErrorAction SilentlyContinue)
+  $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+  if ($proc) {
+    Write-Log "Previous run (PID $lockPid) still active -- skipping"
+    exit 0
+  }
+  # Stale lock -- previous run crashed without cleanup
+  Write-Log "Stale lock from PID $lockPid, removing" 'warn'
+  Remove-Item $lockFile -Force
+}
+$PID | Set-Content $lockFile -Force
+
+# ---- Log retention (30 days) ----
+$cutoff = (Get-Date).AddDays(-30)
+Get-ChildItem $LogDir -Filter "*.log" -ErrorAction SilentlyContinue |
+  Where-Object { $_.LastWriteTime -lt $cutoff } |
+  Remove-Item -Force -ErrorAction SilentlyContinue
+
+try {
+
 # Resolve claude binary
 if (-not $ClaudePath) {
   $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
@@ -326,6 +351,11 @@ Write-Jsonl @{
   attempts = $attempt
   wrapper_duration_sec = $durationSec
   log_file = $LogFile
+}
+
+} finally {
+  # Always release PID lock
+  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
 }
 
 exit 0

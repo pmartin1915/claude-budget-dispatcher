@@ -5,7 +5,7 @@
 // a usage snapshot gating the Budget Dispatcher. Runs as a plain Node script
 // (no Claude cost) on a Windows Task Scheduler cron.
 //
-// Input:  ../config/budget.json (monthly/weekly thresholds, token weights)
+// Input:  ../config/budget.json (trailing30_baseline/weekly thresholds, token weights)
 // Output: ../status/usage-estimate.json (snapshot with gate decision)
 //
 // Exit codes: 0 = success (even if gate is red), 2 = fatal error
@@ -174,12 +174,21 @@ function daysInMonthContaining(ts) {
 // afternoon of light Claude Code usage.
 const MIN_HISTORY_COST = 100;
 
+// G4 fix: minimum calendar span of transcript history before the trailing-30
+// baseline is meaningful. Even if MIN_HISTORY_COST is met, a few hours of
+// heavy use produces nonsense percentages because the math assumes the
+// trailing-30 window represents ~30 days of observed baseline.
+const MIN_HISTORY_DAYS = 7;
+
 function buildSnapshot(config, fileStats) {
   const now = Date.now();
   const weights = config.token_weights;
 
+  // Migration shim: accept both trailing30_baseline (new) and monthly (legacy).
+  const t30 = config.trailing30_baseline || config.monthly;
+
   // C2: validate target_burn_pct_per_day before anything that divides by it.
-  const target = config.monthly?.target_burn_pct_per_day;
+  const target = t30?.target_burn_pct_per_day;
   if (!target || typeof target !== "number" || target <= 0) {
     const paused = config.paused === true || existsSync(PAUSE_FILE);
     return {
@@ -187,7 +196,7 @@ function buildSnapshot(config, fileStats) {
       paused,
       dispatch_authorized: false,
       skip_reason: "invalid-config-target_burn_pct_per_day",
-      monthly: null,
+      trailing30: null,
       weekly: null,
       bootstrap: {
         trailing_30day_cost: 0,
@@ -205,11 +214,14 @@ function buildSnapshot(config, fileStats) {
   let weeklyCost = 0;
   let trailing30 = 0;
 
-  const monthStart = monthlyPeriodStart(now, config.monthly.resets_on_day);
+  const monthStart = monthlyPeriodStart(now, t30.resets_on_day);
   const weekStart = now - config.weekly.rolling_days * 86400_000;
   const thirtyStart = now - 30 * 86400_000;
 
+  let oldestEntry = Infinity;
+
   for (const { when, cost } of fileStats) {
+    if (when < oldestEntry) oldestEntry = when;
     if (when >= thirtyStart) trailing30 += cost;
     if (when >= monthStart) monthlyCost += cost;
     if (when >= weekStart) weeklyCost += cost;
@@ -226,7 +238,7 @@ function buildSnapshot(config, fileStats) {
       paused,
       dispatch_authorized: false,
       skip_reason: "insufficient-history-for-bootstrap",
-      monthly: {
+      trailing30: {
         period_start: new Date(monthStart).toISOString(),
         cost_weighted_units: round(monthlyCost, 0),
         actual_pct: null,
@@ -249,6 +261,51 @@ function buildSnapshot(config, fileStats) {
       bootstrap: {
         trailing_30day_cost: round(trailing30, 0),
         cost_per_pct_point: null,
+        min_history_cost: MIN_HISTORY_COST,
+        method: "trailing-30-anchored-to-target-rate"
+      }
+    };
+  }
+
+  // G4: history-span check. Even if trailing30 > MIN_HISTORY_COST, the math
+  // produces nonsense when history spans only a few hours (e.g. fresh install
+  // with one heavy session). Require MIN_HISTORY_DAYS of calendar span.
+  const historySpanDays = oldestEntry < Infinity
+    ? Math.max(0, (now - oldestEntry) / 86400_000)
+    : 0;
+
+  if (historySpanDays < MIN_HISTORY_DAYS) {
+    const paused = config.paused === true || existsSync(PAUSE_FILE);
+    return {
+      generated_at: new Date(now).toISOString(),
+      paused,
+      dispatch_authorized: false,
+      skip_reason: "insufficient-history-span",
+      trailing30: {
+        period_start: new Date(monthStart).toISOString(),
+        cost_weighted_units: round(monthlyCost, 0),
+        actual_pct: null,
+        expected_pct_at_pace: null,
+        headroom_pct: null,
+        reserve_ok: false,
+        gate_passes: false
+      },
+      weekly: {
+        window_start: new Date(weekStart).toISOString(),
+        rolling_days: config.weekly.rolling_days,
+        cost_weighted_units: round(weeklyCost, 0),
+        actual_pct: null,
+        expected_pct_at_pace: null,
+        headroom_pct: null,
+        reserve_ok: false,
+        gate_passes: false,
+        is_floor: true
+      },
+      bootstrap: {
+        trailing_30day_cost: round(trailing30, 0),
+        cost_per_pct_point: null,
+        history_span_days: round(historySpanDays, 2),
+        min_history_days: MIN_HISTORY_DAYS,
         min_history_cost: MIN_HISTORY_COST,
         method: "trailing-30-anchored-to-target-rate"
       }
@@ -281,18 +338,77 @@ function buildSnapshot(config, fileStats) {
 
   const monthlyReserveOk =
     monthlyActualPct + config.max_opportunistic_pct_per_run
-      <= 100 - config.monthly.reserve_floor_pct;
+      <= 100 - t30.reserve_floor_pct;
   const weeklyReserveOk =
     weeklyActualPct + config.max_opportunistic_pct_per_run
       <= 100 - config.weekly.reserve_floor_pct;
 
   const monthlyGate =
-    monthlyReserveOk && monthlyHeadroom >= config.monthly.trigger_headroom_pct;
+    monthlyReserveOk && monthlyHeadroom >= t30.trigger_headroom_pct;
   const weeklyGate =
     weeklyReserveOk && weeklyHeadroom >= config.weekly.trigger_headroom_pct;
 
-  // Weekly is the floor: both must pass.
-  const dispatchAuthorized = monthlyGate && weeklyGate;
+  // --- Deadline-aware throttle scaling (Proposal 006) ---
+  const ds = config.weekly?.deadline_scaling;
+  let effectiveWeeklyFloor = config.weekly.reserve_floor_pct;
+  let effectiveMaxRuns = config.max_runs_per_day;
+  let effectiveMaxPctPerRun = config.max_opportunistic_pct_per_run;
+  let urgencyMode = "normal";
+  let hoursUntilReset = null;
+
+  if (ds?.enabled) {
+    const resetDay = ds.resets_on_day_of_week;  // 0=Sun..6=Sat
+    const resetHour = ds.resets_at_hour_utc;
+    const nowDate = new Date(now);
+    const currentDay = nowDate.getUTCDay();
+    let daysUntil = (resetDay - currentDay + 7) % 7;
+    if (daysUntil === 0) {
+      if (nowDate.getUTCHours() >= resetHour) daysUntil = 7;
+    }
+    const nextReset = new Date(Date.UTC(
+      nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() + daysUntil,
+      resetHour, 0, 0
+    ));
+    hoursUntilReset = (nextReset.getTime() - now) / 3_600_000;
+
+    // Sort ramp_steps descending by hours_before_reset (later/tighter steps
+    // override earlier/looser ones as the deadline approaches).
+    const sortedSteps = [...(ds.ramp_steps || [])].sort(
+      (a, b) => b.hours_before_reset - a.hours_before_reset
+    );
+    for (const step of sortedSteps) {
+      if (hoursUntilReset < step.hours_before_reset) {
+        effectiveWeeklyFloor = Math.max(step.reserve_floor_pct, ds.hard_minimum_reserve_pct);
+        effectiveMaxRuns = step.max_runs_per_day;
+        effectiveMaxPctPerRun = step.max_pct_per_run;
+        urgencyMode = `urgency-${step.hours_before_reset}h`;
+      }
+    }
+
+    // Interactive reserve check: ensure enough headroom remains for Perry's
+    // interactive use even under urgency scaling.
+    const interactiveHours = ds.interactive_reserve_hours || 4;
+    // Estimate hourly burn at current dispatch pace (3 runs/hour at 20min interval)
+    const runsPerHour = 3;
+    const hourlyBurnPct = effectiveMaxPctPerRun * runsPerHour;
+    const projectedHeadroomAfterRun = weeklyHeadroom - effectiveMaxPctPerRun;
+    const hoursOfInteractiveUse = hourlyBurnPct > 0 ? projectedHeadroomAfterRun / hourlyBurnPct : Infinity;
+    if (hoursOfInteractiveUse < interactiveHours) {
+      urgencyMode = "interactive-reserve-hold";
+      effectiveWeeklyFloor = config.weekly.reserve_floor_pct;
+      effectiveMaxRuns = config.max_runs_per_day;
+      effectiveMaxPctPerRun = config.max_opportunistic_pct_per_run;
+    }
+  }
+
+  // Re-evaluate weekly gate with effective (possibly scaled) parameters.
+  const weeklyReserveOk_effective =
+    weeklyActualPct + effectiveMaxPctPerRun <= 100 - effectiveWeeklyFloor;
+  const weeklyGate_effective =
+    weeklyReserveOk_effective && weeklyHeadroom >= config.weekly.trigger_headroom_pct;
+
+  // Trailing-30 gate is unaffected by deadline scaling.
+  const dispatchAuthorized = monthlyGate && weeklyGate_effective;
 
   const paused = config.paused === true || existsSync(PAUSE_FILE);
 
@@ -304,14 +420,14 @@ function buildSnapshot(config, fileStats) {
       ? "paused"
       : !monthlyGate
         ? !monthlyReserveOk
-          ? "monthly-reserve-floor-threatened"
-          : "monthly-headroom-below-trigger"
-        : !weeklyGate
-          ? !weeklyReserveOk
+          ? "trailing30-reserve-floor-threatened"
+          : "trailing30-headroom-below-trigger"
+        : !weeklyGate_effective
+          ? !weeklyReserveOk_effective
             ? "weekly-reserve-floor-threatened"
             : "weekly-headroom-below-trigger"
           : null,
-    monthly: {
+    trailing30: {
       period_start: new Date(monthStart).toISOString(),
       days_elapsed: round(daysElapsedInMonth, 2),
       days_in_period: daysInMonth,
@@ -329,9 +445,14 @@ function buildSnapshot(config, fileStats) {
       actual_pct: round(weeklyActualPct, 2),
       expected_pct_at_pace: weeklyExpectedPct,
       headroom_pct: round(weeklyHeadroom, 2),
-      reserve_ok: weeklyReserveOk,
-      gate_passes: weeklyGate,
-      is_floor: true
+      reserve_ok: weeklyReserveOk_effective,
+      gate_passes: weeklyGate_effective,
+      is_floor: true,
+      hours_until_reset: hoursUntilReset !== null ? round(hoursUntilReset, 1) : null,
+      urgency_mode: urgencyMode,
+      effective_reserve_floor_pct: round(effectiveWeeklyFloor, 1),
+      effective_max_runs_per_day: effectiveMaxRuns,
+      effective_max_pct_per_run: round(effectiveMaxPctPerRun, 2)
     },
     bootstrap: {
       trailing_30day_cost: round(trailing30, 0),
@@ -386,9 +507,9 @@ async function main() {
   console.log(
     `  dispatch_authorized=${snapshot.dispatch_authorized}  reason=${snapshot.skip_reason || "green-light"}`
   );
-  if (snapshot.monthly && snapshot.monthly.actual_pct !== null) {
+  if (snapshot.trailing30 && snapshot.trailing30.actual_pct !== null) {
     console.log(
-      `  monthly: ${snapshot.monthly.actual_pct}% used / ${snapshot.monthly.expected_pct_at_pace}% expected (headroom ${snapshot.monthly.headroom_pct}%)`
+      `  trailing30: ${snapshot.trailing30.actual_pct}% used / ${snapshot.trailing30.expected_pct_at_pace}% expected (headroom ${snapshot.trailing30.headroom_pct}%)`
     );
   }
   if (snapshot.weekly && snapshot.weekly.actual_pct !== null) {

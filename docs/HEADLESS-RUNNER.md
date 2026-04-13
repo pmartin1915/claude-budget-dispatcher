@@ -30,7 +30,15 @@ Phases 1 and 2 are the fail-fast gate. If either one says "not now," the wrapper
 
 - Windows 10/11 with PowerShell 5.1 or later
 - Node.js 18+ on PATH
-- `claude` CLI installed and authenticated to your Claude Max subscription
+- GitHub CLI (`gh`) on PATH — install via `winget install --id GitHub.cli`,
+  then run `gh auth login` interactively before first use
+- `claude` CLI installed and authenticated to your Claude Max subscription.
+  **Required:** standalone install via `npm install -g @anthropic-ai/claude-code`.
+  The VS Code extension bundles a `claude.exe` but its path changes on every
+  extension update — do not use it for scheduled tasks. Stable paths after
+  standalone install:
+  - npm global: `C:\Users\<username>\AppData\Roaming\npm\claude.cmd`
+  - Homebrew (macOS): `/usr/local/bin/claude` or `~/.local/bin/claude`
 - `claude-budget-dispatcher` repo cloned with `config/budget.json` populated
 
 ### Pre-production verification
@@ -95,40 +103,73 @@ Set `-TimeoutMinutes 1` for this test. Run the wrapper when Phase 3 will actuall
 
 ### Task Scheduler registration
 
-Once all pre-production checks pass, register the wrapper as a scheduled task:
+Once all pre-production checks pass, register the wrapper as a scheduled task.
+
+#### Primary method (recommended): `Register-ScheduledTask`
+
+The `schtasks /TR` argument has a ~261-character limit that real-world paths
+easily exceed. Use the PowerShell cmdlet instead:
 
 ```powershell
 # Run from an elevated PowerShell window (Run as Administrator)
-schtasks /Create `
-  /SC MINUTE `
-  /MO 20 `
-  /TN "ClaudeBudgetDispatcher" `
-  /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"C:\Users\perry\DevProjects\claude-budget-dispatcher\scripts\run-dispatcher.ps1`" -RepoRoot `"C:\Users\perry\DevProjects\claude-budget-dispatcher`"" `
-  /RL LIMITED `
-  /F
+$action = New-ScheduledTaskAction `
+  -Execute "powershell.exe" `
+  -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -File `"C:\Users\perry\DevProjects\dev-ops\scripts\run-dispatcher.ps1`" -RepoRoot `"C:\Users\perry\DevProjects\dev-ops`" -ClaudePath `"C:\Users\perry\AppData\Roaming\npm\claude.cmd`""
+
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+  -RepetitionInterval (New-TimeSpan -Minutes 20) `
+  -RepetitionDuration (New-TimeSpan -Days 365)
+
+$settings = New-ScheduledTaskSettingsSet `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -StartWhenAvailable
+
+Register-ScheduledTask `
+  -TaskName "ClaudeBudgetDispatcher" `
+  -Action $action `
+  -Trigger $trigger `
+  -Settings $settings `
+  -Description "Budget-gated autonomous Claude dispatch (every 20 min)" `
+  -Force
 ```
 
 Parameters:
-- `/SC MINUTE /MO 20` — every 20 minutes
-- `/RL LIMITED` — runs as the current user (required for Claude Max credentials)
-- `/F` — overwrite if already registered
-- `-ExecutionPolicy Bypass` — required on machines with restricted execution policy
-- `-WindowStyle Hidden` — no visible PowerShell window on each invocation
-- `-NoProfile` — don't load the user profile (faster, more predictable)
-
-If your `claude` binary isn't on PATH under Task Scheduler's environment, append `-ClaudePath "C:\absolute\path\to\claude.exe"` to the `/TR` value.
+- `-RepetitionInterval 20min` — every 20 minutes
+- `-AllowStartIfOnBatteries` — runs on laptop battery power
+- `-StartWhenAvailable` — catches up after sleep/hibernate
+- `-Force` — overwrite if already registered
+- `-ClaudePath` — **always pass this explicitly** with the npm global path
 
 To verify registration:
 
 ```powershell
-schtasks /Query /TN "ClaudeBudgetDispatcher" /V /FO LIST
+Get-ScheduledTask -TaskName "ClaudeBudgetDispatcher" | Format-List
 ```
 
 To unregister:
 
 ```powershell
-schtasks /Delete /TN "ClaudeBudgetDispatcher" /F
+Unregister-ScheduledTask -TaskName "ClaudeBudgetDispatcher" -Confirm:$false
 ```
+
+#### Fallback method: `schtasks`
+
+> **Warning:** The `/TR` argument has a ~261-character limit. If your paths are
+> long, the command silently truncates and the task will fail at runtime.
+
+```powershell
+schtasks /Create `
+  /SC MINUTE `
+  /MO 20 `
+  /TN "ClaudeBudgetDispatcher" `
+  /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"C:\Users\perry\DevProjects\dev-ops\scripts\run-dispatcher.ps1`" -RepoRoot `"C:\Users\perry\DevProjects\dev-ops`"" `
+  /RL LIMITED `
+  /F
+```
+
+To verify: `schtasks /Query /TN "ClaudeBudgetDispatcher" /V /FO LIST`
+To unregister: `schtasks /Delete /TN "ClaudeBudgetDispatcher" /F`
 
 ## Log files
 
@@ -154,16 +195,7 @@ Log files should be added to `.gitignore` (they are).
 
 Log files accumulate at a rate of ~72/day (one per scheduled invocation). Roughly 2.2K files/month. Most are tiny (Phase 1 skip → <1KB) but Phase 3 runs can be 10-50KB each.
 
-**Recommended retention policy:** archive files older than 30 days into `status/dispatcher-runs/archive/` via a weekly manual cleanup:
-
-```powershell
-$cutoff = (Get-Date).AddDays(-30)
-Get-ChildItem C:\Users\perry\DevProjects\claude-budget-dispatcher\status\dispatcher-runs\*.log |
-  Where-Object { $_.LastWriteTime -lt $cutoff } |
-  Move-Item -Destination C:\Users\perry\DevProjects\claude-budget-dispatcher\status\dispatcher-runs\archive\
-```
-
-A future enhancement (Proposal 002 in the workflow-enhancement sandbox) could automate this via a `clean` task.
+**Automated cleanup:** The `run-dispatcher.ps1` wrapper automatically deletes log files older than 30 days from `status/dispatcher-runs/` at the start of each run. No manual cleanup is required.
 
 ## Troubleshooting
 
