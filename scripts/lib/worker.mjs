@@ -2,11 +2,86 @@
 // Handles local tasks, audit, codegen (3-step loop), and docs generation.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { resolve, relative, sep } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { resolve, relative, sep, dirname, basename } from "node:path";
 import { extractJson } from "./extract-json.mjs";
 
 const MAX_FILE_CHARS = 50_000; // Per-file context budget for LLM prompts
+
+// Windows reserved device names — CVE-2025-23084 / CVE-2025-27210 bypass vector.
+// Matches CON, PRN, AUX, NUL, COM1-9, LPT1-9 with or without extension.
+const WIN_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:$|\.)/i;
+
+// Env allowlist for subprocesses running untrusted / generated code (S-5).
+// Strips API keys (GEMINI_API_KEY, MISTRAL_API_KEY, etc.) so they cannot be
+// read by generated tests. Keeps the minimum needed for npm / node / git on Windows.
+const SAFE_ENV_KEYS = [
+  "PATH", "Path", "PATHEXT",
+  "SystemRoot", "windir", "COMSPEC",
+  "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData",
+  "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "USERNAME",
+  "TEMP", "TMP",
+  "NODE_PATH", "npm_config_cache",
+];
+
+export function getSafeTestEnv() {
+  const safe = {};
+  for (const k of SAFE_ENV_KEYS) {
+    if (process.env[k] !== undefined) safe[k] = process.env[k];
+  }
+  return safe;
+}
+
+/**
+ * Verify that `candidate` resolves (after symlink canonicalization) inside `base`.
+ * Defeats: symlink escapes (S-3), prefix-substring match (e.g. "/foo/bar" vs
+ * "/foo/bar-evil"), Windows case-insensitivity (S-4), and Windows reserved
+ * device names (S-9, CVE-2025-23084/27210).
+ *
+ * Handles not-yet-existing write targets by walking up to the longest existing
+ * ancestor, realpath'ing that, and rejoining the non-existent suffix.
+ *
+ * @param {string} candidate - Absolute path to check.
+ * @param {string} base - Absolute project root (must exist on disk).
+ * @returns {boolean} true iff candidate is safely inside base.
+ */
+export function isPathInside(candidate, base) {
+  let realBase;
+  try {
+    realBase = realpathSync(base);
+  } catch {
+    return false; // base missing/unreadable — fail closed
+  }
+  const baseWithSep = realBase.endsWith(sep) ? realBase : realBase + sep;
+
+  if (process.platform === "win32") {
+    const segs = candidate.split(/[\\/]/);
+    if (segs.some((s) => WIN_RESERVED.test(s))) return false;
+  }
+
+  // Walk up until we find an existing ancestor, realpath it, then rejoin.
+  let existing = candidate;
+  const suffix = [];
+  for (let guard = 0; guard < 100; guard++) {
+    try {
+      existing = realpathSync(existing);
+      break;
+    } catch (e) {
+      if (e.code !== "ENOENT") return false;
+      const parent = dirname(existing);
+      if (parent === existing) return false; // hit root without finding anything
+      suffix.unshift(basename(existing));
+      existing = parent;
+    }
+  }
+
+  const real = suffix.length ? resolve(existing, ...suffix) : existing;
+
+  if (process.platform === "win32") {
+    return real.toLowerCase().startsWith(baseWithSep.toLowerCase());
+  }
+  return real.startsWith(baseWithSep);
+}
 
 /**
  * Execute the selected task.
@@ -86,6 +161,7 @@ function executeLocalTask(task, projectPath) {
       timeout: 120_000,
       stdio: ["pipe", "pipe", "pipe"],
       encoding: "utf8",
+      env: getSafeTestEnv(), // S-5: strip API keys from project scripts
     });
     return {
       outcome: "success",
@@ -182,10 +258,10 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
     return { outcome: "error", reason: "malformed-worker-output" };
   }
 
-  // Validate all paths are within the project
+  // Validate all paths are within the project (realpath + trailing-sep + case-safe)
   for (const f of parsedFiles) {
     const abs = resolve(projectPath, f.path);
-    if (!abs.startsWith(projectPath)) {
+    if (!isPathInside(abs, projectPath)) {
       return { outcome: "error", reason: `path-escape-attempt: ${f.path}` };
     }
     // Clinical gate: no domain/ writes
@@ -211,7 +287,7 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
       // Validate paths on retry (same checks as first pass)
       for (const f of fixedFiles) {
         const abs = resolve(projectPath, f.path);
-        if (!abs.startsWith(resolve(projectPath))) {
+        if (!isPathInside(abs, projectPath)) {
           revertChanges(projectPath);
           return { outcome: "error", reason: `path-escape-attempt-retry: ${f.path}` };
         }
@@ -466,7 +542,7 @@ function writeGeneratedFiles(parsedFiles, projectPath) {
   for (const f of parsedFiles) {
     const abs = resolve(projectPath, f.path);
     // Defense-in-depth: reject any path that escapes the project directory
-    if (!abs.startsWith(resolve(projectPath))) {
+    if (!isPathInside(abs, projectPath)) {
       throw new Error(`path escape blocked: ${f.path}`);
     }
     ensureDir(resolve(abs, ".."));
@@ -508,6 +584,7 @@ function runTestsSafe(projectPath) {
       timeout: 120_000,
       stdio: ["pipe", "pipe", "pipe"],
       encoding: "utf8",
+      env: getSafeTestEnv(), // S-5: strip API keys — tests may run LLM-generated code
     });
     return { pass: true, stdout };
   } catch (e) {
