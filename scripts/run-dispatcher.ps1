@@ -57,7 +57,10 @@ param(
 
   [int]$TimeoutMinutes = 45,
 
-  [string]$ClaudePath = ''
+  [string]$ClaudePath = '',
+
+  [ValidateSet('claude', 'node')]
+  [string]$Engine = 'claude'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,7 +104,7 @@ function Get-DurationSec {
   return [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
 }
 
-Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes"
+Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes engine=$Engine"
 
 # ---- PID-file mutex (G9 fix) ----
 # Prevents concurrent dispatcher runs (Task Scheduler overlap, manual + scheduled).
@@ -128,230 +131,366 @@ Get-ChildItem $LogDir -Filter "*.log" -ErrorAction SilentlyContinue |
 
 try {
 
-# Resolve claude binary
-if (-not $ClaudePath) {
-  $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
-  if ($claudeCmd) {
-    $ClaudePath = $claudeCmd.Source
-    Write-Log "claude binary resolved via PATH: $ClaudePath"
-  } else {
-    Write-Log "claude binary not found on PATH and -ClaudePath not provided" 'error'
+if ($Engine -eq 'node') {
+  # ---- Node engine: dispatch.mjs handles gates + work internally ----
+  Write-Log "engine=node: invoking dispatch.mjs (gates handled by Node)"
+
+  $dispatchScript = Join-Path $RepoRoot 'scripts\dispatch.mjs'
+  if (-not (Test-Path $dispatchScript)) {
+    Write-Log "dispatch.mjs not found: $dispatchScript" 'error'
     exit 2
   }
-} else {
-  if (-not (Test-Path $ClaudePath)) {
-    Write-Log "claude binary not found at specified path: $ClaudePath" 'error'
-    exit 2
-  }
-  Write-Log "claude binary (explicit): $ClaudePath"
-}
 
-# ---- Phase 1: estimator pre-check ----
-Write-Log "phase 1: running estimate-usage.mjs"
-$estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
-$estimatorOutput = & node $estimatorScript 2>&1
-$estimatorExit = $LASTEXITCODE
-Write-Log "estimator exit=$estimatorExit"
-foreach ($line in $estimatorOutput) {
-  Write-Log "  estimator: $line"
-}
+  $stdoutTemp = Join-Path $LogDir "$timestamp-$RunId.stdout.tmp"
+  $stderrTemp = Join-Path $LogDir "$timestamp-$RunId.stderr.tmp"
 
-if ($estimatorExit -ne 0) {
-  Write-Log "estimator failed, fail closed" 'error'
-  exit 2
-}
+  $attempt = 0
+  $success = $false
+  $finalNodeExit = -1
 
-$snapshotPath = Join-Path $RepoRoot 'status\usage-estimate.json'
-if (-not (Test-Path $snapshotPath)) {
-  Write-Log "estimator ran but no snapshot written, fail closed" 'error'
-  exit 2
-}
+  while (-not $success -and $attempt -le $MaxRetries) {
+    $attempt++
+    Write-Log "attempt $attempt of $($MaxRetries + 1)"
 
-$snapshot = Get-Content $snapshotPath -Raw | ConvertFrom-Json
-if (-not $snapshot.dispatch_authorized) {
-  Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason), no-op exit 0"
+    $proc = $null
+    try {
+      $proc = Start-Process -FilePath "node" `
+        -ArgumentList $dispatchScript `
+        -RedirectStandardOutput $stdoutTemp `
+        -RedirectStandardError $stderrTemp `
+        -NoNewWindow `
+        -PassThru `
+        -WorkingDirectory $RepoRoot
+    } catch {
+      Write-Log "failed to start node: $_" 'error'
+    }
 
-  Write-Jsonl @{
-    ts = (Get-Date).ToString('o')
-    run_id = $RunId
-    outcome = 'skipped'
-    reason = $snapshot.skip_reason
-    phase = 'estimator-gate'
-    wrapper_duration_sec = Get-DurationSec
-  }
+    if ($null -ne $proc) {
+      $timeoutMs = $TimeoutMinutes * 60 * 1000
+      $procExited = $proc.WaitForExit($timeoutMs)
 
-  exit 0
-}
+      if (-not $procExited) {
+        Write-Log "HARD TIMEOUT after $TimeoutMinutes min, killing process" 'error'
+        try { $proc.Kill() } catch { $null = $_ }
+        $null = $proc.WaitForExit(5000)
 
-# ---- Phase 2: activity gate ----
-Write-Log "phase 2: running check-idle.mjs"
-$idleScript = Join-Path $RepoRoot 'scripts\check-idle.mjs'
-$idleOutput = & node $idleScript 20 2>&1
-$idleExit = $LASTEXITCODE
-Write-Log "check-idle exit=$idleExit output=$idleOutput"
+        Write-Jsonl @{
+          ts = (Get-Date).ToString('o')
+          run_id = $RunId
+          outcome = 'error'
+          reason = 'hard-timeout'
+          timeout_minutes = $TimeoutMinutes
+          phase = 'dispatch-mjs'
+          engine = 'node'
+          wrapper_duration_sec = Get-DurationSec
+        }
 
-if ($idleExit -eq 1) {
-  Write-Log "user-active, skipping"
-  Write-Jsonl @{
-    ts = (Get-Date).ToString('o')
-    run_id = $RunId
-    outcome = 'skipped'
-    reason = 'user-active'
-    phase = 'activity-gate'
-    wrapper_duration_sec = Get-DurationSec
-  }
-  exit 0
-}
-
-if ($idleExit -eq 2) {
-  Write-Log "idle check errored, fail closed" 'error'
-  exit 2
-}
-
-# ---- Phase 3: claude -p invocation with retry ----
-# Uses temp files for stdin/stdout/stderr redirection via Start-Process.
-# This is simpler and more robust than async event handlers on PS 5.1.
-Write-Log "phase 3: invoking claude -p"
-
-$stdinTemp = Join-Path $LogDir "$timestamp-$RunId.stdin.tmp"
-$stdoutTemp = Join-Path $LogDir "$timestamp-$RunId.stdout.tmp"
-$stderrTemp = Join-Path $LogDir "$timestamp-$RunId.stderr.tmp"
-
-# Pre-write the prompt to the stdin temp file
-Copy-Item -Path $PromptFile -Destination $stdinTemp -Force
-
-$attempt = 0
-$success = $false
-$finalClaudeExit = -1
-
-while (-not $success -and $attempt -le $MaxRetries) {
-  $attempt++
-  Write-Log "attempt $attempt of $($MaxRetries + 1)"
-
-  $procError = $null
-  $procExited = $false
-  $proc = $null
-
-  try {
-    $proc = Start-Process -FilePath $ClaudePath `
-      -ArgumentList '-p' `
-      -RedirectStandardInput $stdinTemp `
-      -RedirectStandardOutput $stdoutTemp `
-      -RedirectStandardError $stderrTemp `
-      -NoNewWindow `
-      -PassThru `
-      -WorkingDirectory $RepoRoot
-  } catch {
-    $procError = $_
-    Write-Log "failed to start claude: $procError" 'error'
-  }
-
-  if ($null -ne $proc) {
-    $timeoutMs = $TimeoutMinutes * 60 * 1000
-    $procExited = $proc.WaitForExit($timeoutMs)
-
-    if (-not $procExited) {
-      Write-Log "HARD TIMEOUT after $TimeoutMinutes min, killing process" 'error'
-      try { $proc.Kill() } catch { $null = $_ }
-      $null = $proc.WaitForExit(5000)
-
-      Write-Jsonl @{
-        ts = (Get-Date).ToString('o')
-        run_id = $RunId
-        outcome = 'error'
-        reason = 'hard-timeout'
-        timeout_minutes = $TimeoutMinutes
-        phase = 'claude-p'
-        wrapper_duration_sec = Get-DurationSec
+        Remove-Item $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
+        exit 3
       }
 
-      Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
-      exit 3
-    }
+      $finalNodeExit = $proc.ExitCode
+      Write-Log "dispatch.mjs exit=$finalNodeExit"
 
-    $finalClaudeExit = $proc.ExitCode
-    Write-Log "claude exit=$finalClaudeExit"
-
-    # Read captured output into the log file
-    Add-Content -Path $LogFile -Value "---STDOUT---"
-    if (Test-Path $stdoutTemp) {
-      $stdoutContent = Get-Content $stdoutTemp -Raw -ErrorAction SilentlyContinue
-      if ($stdoutContent) { Add-Content -Path $LogFile -Value $stdoutContent }
-    }
-    Add-Content -Path $LogFile -Value "---STDERR---"
-    if (Test-Path $stderrTemp) {
-      $stderrContent = Get-Content $stderrTemp -Raw -ErrorAction SilentlyContinue
-      if ($stderrContent) { Add-Content -Path $LogFile -Value $stderrContent }
-    }
-
-    if ($finalClaudeExit -eq 0) {
-      $success = $true
-      Write-Log "claude -p succeeded on attempt $attempt"
-    } elseif ($finalClaudeExit -eq 1 -or $finalClaudeExit -eq 2) {
-      Write-Log "claude -p returned exit=$finalClaudeExit (non-retryable), fail closed" 'error'
-
-      Write-Jsonl @{
-        ts = (Get-Date).ToString('o')
-        run_id = $RunId
-        outcome = 'error'
-        reason = "claude-exit-$finalClaudeExit"
-        phase = 'claude-p'
-        attempts = $attempt
-        wrapper_duration_sec = Get-DurationSec
+      # Capture output to log file
+      Add-Content -Path $LogFile -Value "---STDOUT---"
+      if (Test-Path $stdoutTemp) {
+        $stdoutContent = Get-Content $stdoutTemp -Raw -ErrorAction SilentlyContinue
+        if ($stdoutContent) { Add-Content -Path $LogFile -Value $stdoutContent }
+      }
+      Add-Content -Path $LogFile -Value "---STDERR---"
+      if (Test-Path $stderrTemp) {
+        $stderrContent = Get-Content $stderrTemp -Raw -ErrorAction SilentlyContinue
+        if ($stderrContent) { Add-Content -Path $LogFile -Value $stderrContent }
       }
 
-      Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
-      exit 2
+      if ($finalNodeExit -eq 0) {
+        $success = $true
+        Write-Log "dispatch.mjs succeeded on attempt $attempt"
+      } elseif ($finalNodeExit -eq 2) {
+        Write-Log "dispatch.mjs returned exit=2 (fatal, non-retryable)" 'error'
+        Write-Jsonl @{
+          ts = (Get-Date).ToString('o')
+          run_id = $RunId
+          outcome = 'error'
+          reason = "dispatch-mjs-exit-$finalNodeExit"
+          phase = 'dispatch-mjs'
+          engine = 'node'
+          attempts = $attempt
+          wrapper_duration_sec = Get-DurationSec
+        }
+        Remove-Item $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
+        exit 2
+      } else {
+        Write-Log "dispatch.mjs returned exit=$finalNodeExit (retryable)" 'warn'
+        if ($attempt -le $MaxRetries) {
+          $backoffSec = [Math]::Pow(2, $attempt) * 5
+          Write-Log "backoff $backoffSec sec before retry"
+          Start-Sleep -Seconds $backoffSec
+        }
+      }
     } else {
-      Write-Log "claude -p returned exit=$finalClaudeExit (retryable)" 'warn'
       if ($attempt -le $MaxRetries) {
         $backoffSec = [Math]::Pow(2, $attempt) * 5
-        Write-Log "backoff $backoffSec sec before retry"
         Start-Sleep -Seconds $backoffSec
       }
     }
+  }
+
+  Remove-Item $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
+
+  if (-not $success) {
+    Write-Log "all retries exhausted (node engine), fail closed" 'error'
+    Write-Jsonl @{
+      ts = (Get-Date).ToString('o')
+      run_id = $RunId
+      outcome = 'error'
+      reason = 'retries-exhausted'
+      phase = 'dispatch-mjs'
+      engine = 'node'
+      attempts = $attempt
+      last_exit = $finalNodeExit
+      wrapper_duration_sec = Get-DurationSec
+    }
+    exit 1
+  }
+
+  $durationSec = Get-DurationSec
+  Write-Log "run complete (node) duration=${durationSec}s run_id=$RunId"
+  Write-Jsonl @{
+    ts = (Get-Date).ToString('o')
+    run_id = $RunId
+    outcome = 'wrapper-success'
+    phase = 'complete'
+    engine = 'node'
+    attempts = $attempt
+    wrapper_duration_sec = $durationSec
+    log_file = $LogFile
+  }
+
+} else {
+  # ---- Claude engine: original behavior ----
+
+  # Resolve claude binary
+  if (-not $ClaudePath) {
+    $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($claudeCmd) {
+      $ClaudePath = $claudeCmd.Source
+      Write-Log "claude binary resolved via PATH: $ClaudePath"
+    } else {
+      Write-Log "claude binary not found on PATH and -ClaudePath not provided" 'error'
+      exit 2
+    }
   } else {
-    # Start-Process failed
-    if ($attempt -le $MaxRetries) {
-      $backoffSec = [Math]::Pow(2, $attempt) * 5
-      Start-Sleep -Seconds $backoffSec
+    if (-not (Test-Path $ClaudePath)) {
+      Write-Log "claude binary not found at specified path: $ClaudePath" 'error'
+      exit 2
+    }
+    Write-Log "claude binary (explicit): $ClaudePath"
+  }
+
+  # ---- Phase 1: estimator pre-check ----
+  Write-Log "phase 1: running estimate-usage.mjs"
+  $estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
+  $estimatorOutput = & node $estimatorScript 2>&1
+  $estimatorExit = $LASTEXITCODE
+  Write-Log "estimator exit=$estimatorExit"
+  foreach ($line in $estimatorOutput) {
+    Write-Log "  estimator: $line"
+  }
+
+  if ($estimatorExit -ne 0) {
+    Write-Log "estimator failed, fail closed" 'error'
+    exit 2
+  }
+
+  $snapshotPath = Join-Path $RepoRoot 'status\usage-estimate.json'
+  if (-not (Test-Path $snapshotPath)) {
+    Write-Log "estimator ran but no snapshot written, fail closed" 'error'
+    exit 2
+  }
+
+  $snapshot = Get-Content $snapshotPath -Raw | ConvertFrom-Json
+  if (-not $snapshot.dispatch_authorized) {
+    Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason), no-op exit 0"
+
+    Write-Jsonl @{
+      ts = (Get-Date).ToString('o')
+      run_id = $RunId
+      outcome = 'skipped'
+      reason = $snapshot.skip_reason
+      phase = 'estimator-gate'
+      wrapper_duration_sec = Get-DurationSec
+    }
+
+    exit 0
+  }
+
+  # ---- Phase 2: activity gate ----
+  Write-Log "phase 2: running check-idle.mjs"
+  $idleScript = Join-Path $RepoRoot 'scripts\check-idle.mjs'
+  $idleOutput = & node $idleScript 20 2>&1
+  $idleExit = $LASTEXITCODE
+  Write-Log "check-idle exit=$idleExit output=$idleOutput"
+
+  if ($idleExit -eq 1) {
+    Write-Log "user-active, skipping"
+    Write-Jsonl @{
+      ts = (Get-Date).ToString('o')
+      run_id = $RunId
+      outcome = 'skipped'
+      reason = 'user-active'
+      phase = 'activity-gate'
+      wrapper_duration_sec = Get-DurationSec
+    }
+    exit 0
+  }
+
+  if ($idleExit -eq 2) {
+    Write-Log "idle check errored, fail closed" 'error'
+    exit 2
+  }
+
+  # ---- Phase 3: claude -p invocation with retry ----
+  Write-Log "phase 3: invoking claude -p"
+
+  $stdinTemp = Join-Path $LogDir "$timestamp-$RunId.stdin.tmp"
+  $stdoutTemp = Join-Path $LogDir "$timestamp-$RunId.stdout.tmp"
+  $stderrTemp = Join-Path $LogDir "$timestamp-$RunId.stderr.tmp"
+
+  Copy-Item -Path $PromptFile -Destination $stdinTemp -Force
+
+  $attempt = 0
+  $success = $false
+  $finalClaudeExit = -1
+
+  while (-not $success -and $attempt -le $MaxRetries) {
+    $attempt++
+    Write-Log "attempt $attempt of $($MaxRetries + 1)"
+
+    $procError = $null
+    $procExited = $false
+    $proc = $null
+
+    try {
+      $proc = Start-Process -FilePath $ClaudePath `
+        -ArgumentList '-p' `
+        -RedirectStandardInput $stdinTemp `
+        -RedirectStandardOutput $stdoutTemp `
+        -RedirectStandardError $stderrTemp `
+        -NoNewWindow `
+        -PassThru `
+        -WorkingDirectory $RepoRoot
+    } catch {
+      $procError = $_
+      Write-Log "failed to start claude: $procError" 'error'
+    }
+
+    if ($null -ne $proc) {
+      $timeoutMs = $TimeoutMinutes * 60 * 1000
+      $procExited = $proc.WaitForExit($timeoutMs)
+
+      if (-not $procExited) {
+        Write-Log "HARD TIMEOUT after $TimeoutMinutes min, killing process" 'error'
+        try { $proc.Kill() } catch { $null = $_ }
+        $null = $proc.WaitForExit(5000)
+
+        Write-Jsonl @{
+          ts = (Get-Date).ToString('o')
+          run_id = $RunId
+          outcome = 'error'
+          reason = 'hard-timeout'
+          timeout_minutes = $TimeoutMinutes
+          phase = 'claude-p'
+          wrapper_duration_sec = Get-DurationSec
+        }
+
+        Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
+        exit 3
+      }
+
+      $finalClaudeExit = $proc.ExitCode
+      Write-Log "claude exit=$finalClaudeExit"
+
+      Add-Content -Path $LogFile -Value "---STDOUT---"
+      if (Test-Path $stdoutTemp) {
+        $stdoutContent = Get-Content $stdoutTemp -Raw -ErrorAction SilentlyContinue
+        if ($stdoutContent) { Add-Content -Path $LogFile -Value $stdoutContent }
+      }
+      Add-Content -Path $LogFile -Value "---STDERR---"
+      if (Test-Path $stderrTemp) {
+        $stderrContent = Get-Content $stderrTemp -Raw -ErrorAction SilentlyContinue
+        if ($stderrContent) { Add-Content -Path $LogFile -Value $stderrContent }
+      }
+
+      if ($finalClaudeExit -eq 0) {
+        $success = $true
+        Write-Log "claude -p succeeded on attempt $attempt"
+      } elseif ($finalClaudeExit -eq 1 -or $finalClaudeExit -eq 2) {
+        Write-Log "claude -p returned exit=$finalClaudeExit (non-retryable), fail closed" 'error'
+
+        Write-Jsonl @{
+          ts = (Get-Date).ToString('o')
+          run_id = $RunId
+          outcome = 'error'
+          reason = "claude-exit-$finalClaudeExit"
+          phase = 'claude-p'
+          attempts = $attempt
+          wrapper_duration_sec = Get-DurationSec
+        }
+
+        Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
+        exit 2
+      } else {
+        Write-Log "claude -p returned exit=$finalClaudeExit (retryable)" 'warn'
+        if ($attempt -le $MaxRetries) {
+          $backoffSec = [Math]::Pow(2, $attempt) * 5
+          Write-Log "backoff $backoffSec sec before retry"
+          Start-Sleep -Seconds $backoffSec
+        }
+      }
+    } else {
+      if ($attempt -le $MaxRetries) {
+        $backoffSec = [Math]::Pow(2, $attempt) * 5
+        Start-Sleep -Seconds $backoffSec
+      }
     }
   }
-}
 
-# Cleanup temp files
-Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
+  Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
 
-if (-not $success) {
-  Write-Log "all retries exhausted, fail closed" 'error'
+  if (-not $success) {
+    Write-Log "all retries exhausted, fail closed" 'error'
+
+    Write-Jsonl @{
+      ts = (Get-Date).ToString('o')
+      run_id = $RunId
+      outcome = 'error'
+      reason = 'retries-exhausted'
+      phase = 'claude-p'
+      attempts = $attempt
+      last_claude_exit = $finalClaudeExit
+      wrapper_duration_sec = Get-DurationSec
+    }
+
+    exit 1
+  }
+
+  $durationSec = Get-DurationSec
+  Write-Log "run complete duration=${durationSec}s run_id=$RunId"
 
   Write-Jsonl @{
     ts = (Get-Date).ToString('o')
     run_id = $RunId
-    outcome = 'error'
-    reason = 'retries-exhausted'
-    phase = 'claude-p'
+    outcome = 'wrapper-success'
+    phase = 'complete'
+    engine = 'claude'
     attempts = $attempt
-    last_claude_exit = $finalClaudeExit
-    wrapper_duration_sec = Get-DurationSec
+    wrapper_duration_sec = $durationSec
+    log_file = $LogFile
   }
 
-  exit 1
-}
-
-# ---- Phase 4: log the run ----
-$durationSec = Get-DurationSec
-Write-Log "run complete duration=${durationSec}s run_id=$RunId"
-
-Write-Jsonl @{
-  ts = (Get-Date).ToString('o')
-  run_id = $RunId
-  outcome = 'wrapper-success'
-  phase = 'complete'
-  attempts = $attempt
-  wrapper_duration_sec = $durationSec
-  log_file = $LogFile
-}
+} # end Engine if/else
 
 } finally {
   # Always release PID lock

@@ -1,0 +1,15 @@
+{
+  "name": "claude-budget-dispatcher",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Budget-aware opportunistic dispatcher with direct model API support",
+  "scripts": {
+    "dispatch": "node scripts/dispatch.mjs",
+    "estimate": "node scripts/estimate-usage.mjs",
+    "check-idle": "node scripts/check-idle.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "@mistralai/mistralai": "^1.0.0"
+  }
+}

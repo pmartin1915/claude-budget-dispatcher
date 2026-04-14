@@ -219,14 +219,11 @@ function buildSnapshot(config, fileStats) {
   const weekStart = now - config.weekly.rolling_days * 86400_000;
   const thirtyStart = now - 30 * 86400_000;
 
-  let oldestEntry = Infinity;
-
   for (const { when, cost } of fileStats) {
     if (when < oldestEntry) oldestEntry = when;
     if (when >= thirtyStart) trailing30 += cost;
     if (when >= monthStart) monthlyCost += cost;
     if (when >= weekStart) weeklyCost += cost;
-    if (when < oldestEntry) oldestEntry = when;
   }
 
   // C1: fail closed on cold start. Without a trailing-30-day baseline the
