@@ -112,10 +112,14 @@ function buildSelectorPrompt(contexts) {
 - Last dispatched: ${ctx.last_dispatched}
 
 **State:**
+<data source="STATE.md" project="${ctx.slug}">
 ${ctx.state_summary}
+</data>
 
 **Pre-Approved Tasks:**
-${ctx.approved_tasks}`
+<data source="DISPATCH.md" project="${ctx.slug}">
+${ctx.approved_tasks}
+</data>`
     )
     .join("\n\n---\n\n");
 

@@ -141,8 +141,12 @@ export async function verifyAndCommit(workResult, selection, route, config, clie
   const summary = workResult.summary ?? "automated work";
   const msg = `[opportunistic][dispatch.mjs]${modelTag} ${selection.task}: ${summary}`;
 
-  // Stage and commit
-  execFileSync("git", ["add", "-A"], {
+  // Stage only files the worker touched (not git add -A)
+  const changedFiles = getChangedFiles(worktreePath);
+  if (changedFiles.length === 0) {
+    return { ...workResult, outcome: "no-changes", reason: "nothing-to-commit" };
+  }
+  execFileSync("git", ["add", "--", ...changedFiles], {
     cwd: worktreePath,
     timeout: 10_000,
     stdio: ["pipe", "pipe", "pipe"],
