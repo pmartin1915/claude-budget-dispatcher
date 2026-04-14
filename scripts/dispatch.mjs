@@ -71,7 +71,7 @@ async function main() {
 
   // Phase 1: Gates (0 tokens)
   console.log("[dispatch] phase 1: gates");
-  const gateResult = runGates(config);
+  const gateResult = runGates(config, { engine: "node" });
   if (!gateResult.proceed) {
     console.log(`[dispatch] gated: ${gateResult.reason}`);
     appendLog({

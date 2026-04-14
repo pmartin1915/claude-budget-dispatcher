@@ -15,9 +15,10 @@ const REPO_ROOT = resolve(__dirname, "..", "..");
  * Run all gate checks. Returns { proceed, reason } where proceed=false means
  * the dispatcher should skip this cycle.
  * @param {object} config - Parsed budget.json
+ * @param {{ engine?: string }} [opts] - Options. engine="node" skips budget gate.
  * @returns {{ proceed: boolean, reason: string|null }}
  */
-export function runGates(config) {
+export function runGates(config, opts = {}) {
   // Step 0: PAUSED kill switch
   const pauseFile = config.kill_switches?.pause_file;
   const configPausePath = resolve(REPO_ROOT, "config", "PAUSED");
@@ -32,31 +33,36 @@ export function runGates(config) {
   }
 
   // Step 1: Budget gate — run estimate-usage.mjs
-  const estimatorScript = resolve(SCRIPTS_DIR, "estimate-usage.mjs");
-  try {
-    execFileSync("node", [estimatorScript], {
-      cwd: REPO_ROOT,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 60_000,
-    });
-  } catch (e) {
-    return { proceed: false, reason: `estimator-error-exit-${e.status ?? "unknown"}` };
-  }
+  // Skip for node engine: dispatch.mjs uses free-tier APIs, not Claude Max.
+  let snapshot = null;
+  if (opts.engine === "node") {
+    console.log("[gates] budget gate skipped (node engine uses free-tier APIs)");
+  } else {
+    const estimatorScript = resolve(SCRIPTS_DIR, "estimate-usage.mjs");
+    try {
+      execFileSync("node", [estimatorScript], {
+        cwd: REPO_ROOT,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 60_000,
+      });
+    } catch (e) {
+      return { proceed: false, reason: `estimator-error-exit-${e.status ?? "unknown"}` };
+    }
 
-  const snapshotPath = resolve(REPO_ROOT, "status", "usage-estimate.json");
-  if (!existsSync(snapshotPath)) {
-    return { proceed: false, reason: "estimator-no-snapshot" };
-  }
+    const snapshotPath = resolve(REPO_ROOT, "status", "usage-estimate.json");
+    if (!existsSync(snapshotPath)) {
+      return { proceed: false, reason: "estimator-no-snapshot" };
+    }
 
-  let snapshot;
-  try {
-    snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
-  } catch (parseErr) {
-    return { proceed: false, reason: `estimator-snapshot-parse-error: ${parseErr.message}` };
-  }
+    try {
+      snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+    } catch (parseErr) {
+      return { proceed: false, reason: `estimator-snapshot-parse-error: ${parseErr.message}` };
+    }
 
-  if (!snapshot.dispatch_authorized) {
-    return { proceed: false, reason: snapshot.skip_reason ?? "gate-red" };
+    if (!snapshot.dispatch_authorized) {
+      return { proceed: false, reason: snapshot.skip_reason ?? "gate-red" };
+    }
   }
 
   // Step 2: Activity gate — run check-idle.mjs
@@ -77,7 +83,7 @@ export function runGates(config) {
   }
 
   // Step 3: Daily quota
-  const effectiveMaxRuns = snapshot.weekly?.effective_max_runs_per_day
+  const effectiveMaxRuns = snapshot?.weekly?.effective_max_runs_per_day
     ?? config.max_runs_per_day
     ?? 8;
   const todayRuns = countTodayRuns();
