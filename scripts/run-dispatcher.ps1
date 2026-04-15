@@ -106,22 +106,38 @@ function Get-DurationSec {
 
 Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes engine=$Engine"
 
-# ---- PID-file mutex (G9 fix) ----
-# Prevents concurrent dispatcher runs (Task Scheduler overlap, manual + scheduled).
-$StatusDir = Join-Path $RepoRoot 'status'
-$lockFile = Join-Path $StatusDir "dispatcher.lock"
-if (Test-Path $lockFile) {
-  $lockPid = [int](Get-Content $lockFile -ErrorAction SilentlyContinue)
-  $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
-  if ($proc) {
-    Write-Log "Previous run (PID $lockPid) still active -- skipping"
-    exit 0
-  }
-  # Stale lock -- previous run crashed without cleanup
-  Write-Log "Stale lock from PID $lockPid, removing" 'warn'
-  Remove-Item $lockFile -Force
+# ---- Named mutex (R-3) ----
+# Windows kernel-owned mutex in the Global\ namespace. Cross-session and
+# cross-process; kernel automatically releases it if this process dies for
+# any reason. Supersedes the G9 PID-file approach which was PID-reuse
+# vulnerable and could race across the Test-Path / Set-Content window.
+$mutexName = 'Global\claude-budget-dispatcher'
+$mutex = $null
+$mutexAcquired = $false
+try {
+  $mutex = New-Object System.Threading.Mutex($false, $mutexName)
+} catch {
+  Write-Log "failed to create mutex ${mutexName}: $_" 'error'
+  exit 2
 }
-$PID | Set-Content $lockFile -Force
+try {
+  $mutexAcquired = $mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+  # Previous holder died without releasing. Per .NET semantics we DID
+  # acquire ownership; we just get notified that the previous state is
+  # indeterminate. Treat as a successful acquire and log for forensics.
+  Write-Log "previous dispatcher crashed without releasing mutex, acquired anyway" 'warn'
+  $mutexAcquired = $true
+}
+if (-not $mutexAcquired) {
+  Write-Log "another dispatcher instance holds $mutexName, skipping"
+  try {
+    $mutex.Dispose()
+  } catch {
+    Write-Log "failed to dispose mutex on contention path: $_" 'warn'
+  }
+  exit 0
+}
 
 # ---- Log retention (30 days) ----
 $cutoff = (Get-Date).AddDays(-30)
@@ -501,8 +517,26 @@ if ($Engine -eq 'node') {
 } # end Engine if/else
 
 } finally {
-  # Always release PID lock
-  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  # Release named mutex (R-3). Kernel auto-releases on process death but
+  # an explicit release lets a rapid-succession re-run avoid the abandoned-
+  # mutex warning path. ReleaseMutex must run on the owning thread;
+  # PowerShell 5.1 top-level scripts are single-threaded so this is safe.
+  # Cleanup failures are logged (not swallowed) so forensics can spot
+  # handle leaks if they ever appear.
+  if ($null -ne $mutex) {
+    if ($mutexAcquired) {
+      try {
+        $mutex.ReleaseMutex()
+      } catch {
+        Write-Log "failed to release mutex: $_" 'warn'
+      }
+    }
+    try {
+      $mutex.Dispose()
+    } catch {
+      Write-Log "failed to dispose mutex: $_" 'warn'
+    }
+  }
 }
 
 exit 0
