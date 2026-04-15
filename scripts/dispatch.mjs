@@ -30,6 +30,7 @@ import { resolveModel } from "./lib/router.mjs";
 import { executeWork } from "./lib/worker.mjs";
 import { createWorktree, restoreOrigin, verifyAndCommit } from "./lib/verify-commit.mjs";
 import { appendLog, writeLastRun } from "./lib/log.mjs";
+import { sweepStaleIndexLocks } from "./lib/git-lock.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -83,6 +84,15 @@ async function main() {
     writeLastRun({ outcome: "skipped", reason: gateResult.reason }, Date.now() - startMs);
     process.exit(0);
   }
+
+  // R-7: remove stale .git/index.lock files from rotation project clones.
+  // Safe here because run-dispatcher.ps1's Global\claude-budget-dispatcher
+  // mutex (R-3) guarantees no other dispatcher instance is holding a git
+  // lock. 30-min age threshold never races a legitimate commit.
+  const projectPaths = (config.projects_in_rotation ?? [])
+    .map((p) => p.path)
+    .filter(Boolean);
+  sweepStaleIndexLocks(projectPaths);
 
   // Initialize API clients (only after gates pass to avoid key errors on no-op)
   const clients = initClients();
