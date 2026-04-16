@@ -93,11 +93,28 @@ Both engines use the same mutex (`Global\claude-budget-dispatcher`), so they can
 
 The `BudgetDispatcher-Node` scheduled task uses `-Engine auto`. The old `ClaudeBudgetDispatcher` task is disabled and no longer needed.
 
-**Force a specific engine:**
+**Dashboard (recommended for switching):**
+```bash
+node scripts/dashboard.mjs        # opens http://localhost:7380
+# Or: npm run dashboard
+```
+The dashboard shows engine mode, budget state, last run, and recent logs. Click a button to switch engines instantly. The override persists in `config/budget.json` -- no admin privileges needed, works even when the dashboard isn't running.
+
+**CLI control (terminal alternative):**
+```bash
+node scripts/control.mjs           # interactive menu
+# Or: npm run control
+```
+
+**Config override (manual):**
+Set `"engine_override"` in `config/budget.json` to `"node"`, `"claude"`, or `null` (auto). The scheduled task reads this on every firing.
+
+**Force a specific engine (command line):**
 ```powershell
 # Override auto mode for testing:
 .\scripts\run-dispatcher.ps1 -RepoRoot . -Engine node    # force free models
 .\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude  # force Claude (budget gate still applies)
+.\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude -ForceBudget  # bypass budget gate (manual validation only)
 ```
 
 ---

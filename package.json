@@ -6,7 +6,9 @@
   "scripts": {
     "dispatch": "node scripts/dispatch.mjs",
     "estimate": "node scripts/estimate-usage.mjs",
-    "check-idle": "node scripts/check-idle.mjs"
+    "check-idle": "node scripts/check-idle.mjs",
+    "dashboard": "node scripts/dashboard.mjs",
+    "control": "node scripts/control.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",

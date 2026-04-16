@@ -4,6 +4,9 @@
   "paused": false,
   "dry_run": true,
 
+  "$comment_engine_override": "Override the scheduled task engine. 'node' = free models only, 'claude' = Claude Max, 'auto' = budget-adaptive (default). null = use -Engine parameter from scheduled task. Set via dashboard (node scripts/dashboard.mjs) or control CLI (node scripts/control.mjs).",
+  "engine_override": null,
+
   "monthly": {
     "resets_on_day": 1,
     "$comment_target_burn_pct_per_day": "Percent of monthly budget you intend to burn per day at steady-state pace. MUST be > 0 — a zero or missing value causes the estimator to fail closed with skip_reason: invalid-config-target_burn_pct_per_day.",

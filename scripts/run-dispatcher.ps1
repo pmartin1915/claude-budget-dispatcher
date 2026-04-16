@@ -60,7 +60,9 @@ param(
   [string]$ClaudePath = '',
 
   [ValidateSet('claude', 'node', 'auto')]
-  [string]$Engine = 'claude'
+  [string]$Engine = 'claude',
+
+  [switch]$ForceBudget
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,7 +106,7 @@ function Get-DurationSec {
   return [math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
 }
 
-Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes engine=$Engine"
+Write-Log "run_id=$RunId repo_root=$RepoRoot timeout_minutes=$TimeoutMinutes engine=$Engine force_budget=$ForceBudget"
 
 # ---- Named mutex (R-3) ----
 # Windows kernel-owned mutex in the Global\ namespace. Cross-session and
@@ -147,38 +149,61 @@ Get-ChildItem $LogDir -Filter "*.log" -ErrorAction SilentlyContinue |
 
 try {
 
+# ---- Engine override from config ----
+# If budget.json contains engine_override (set by dashboard or control CLI),
+# use it instead of the -Engine parameter. This lets the user switch engines
+# without touching the scheduled task arguments (no admin required).
+$configPath = Join-Path $RepoRoot 'config\budget.json'
+if (Test-Path $configPath) {
+  try {
+    $budgetCfg = Get-Content $configPath -Raw | ConvertFrom-Json
+    $override = $budgetCfg.engine_override
+    if ($override -and $override -ne 'null' -and @('claude','node','auto') -contains $override) {
+      Write-Log "engine_override=$override from config/budget.json (overriding -Engine $Engine)"
+      $Engine = $override
+    }
+  } catch {
+    Write-Log "failed to read engine_override from config: $_ (using -Engine $Engine)" 'warn'
+  }
+}
+
 # ---- Engine auto-selection ----
 # When -Engine auto, refresh the budget estimate (zero LLM cost, just local
 # file scanning) and read the snapshot to decide: if Claude budget has
 # headroom, use Claude for plan/design/architecture tasks. Otherwise, use
 # the free-model engine. Fail-safe: defaults to node on any error.
 if ($Engine -eq 'auto') {
-  $estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
-  $estimatorOutput = & node $estimatorScript 2>&1
-  $estimatorExit = $LASTEXITCODE
-  Write-Log "auto: estimator refresh exit=$estimatorExit"
+  if ($ForceBudget) {
+    Write-Log "auto: -ForceBudget set, forcing claude engine" 'warn'
+    $Engine = 'claude'
+  } else {
+    $estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
+    $estimatorOutput = & node $estimatorScript 2>&1
+    $estimatorExit = $LASTEXITCODE
+    Write-Log "auto: estimator refresh exit=$estimatorExit"
 
-  $resolvedEngine = 'node'
+    $resolvedEngine = 'node'
 
-  if ($estimatorExit -eq 0) {
-    $snapshotPath = Join-Path $RepoRoot 'status\usage-estimate.json'
-    if (Test-Path $snapshotPath) {
-      $snap = Get-Content $snapshotPath -Raw | ConvertFrom-Json
-      if ($snap.dispatch_authorized -eq $true) {
-        Write-Log "auto: budget authorized (headroom=$($snap.trailing30.headroom_pct)%), selecting claude"
-        $resolvedEngine = 'claude'
+    if ($estimatorExit -eq 0) {
+      $snapshotPath = Join-Path $RepoRoot 'status\usage-estimate.json'
+      if (Test-Path $snapshotPath) {
+        $snap = Get-Content $snapshotPath -Raw | ConvertFrom-Json
+        if ($snap.dispatch_authorized -eq $true) {
+          Write-Log "auto: budget authorized (headroom=$($snap.trailing30.headroom_pct)%), selecting claude"
+          $resolvedEngine = 'claude'
+        } else {
+          Write-Log "auto: budget gate red ($($snap.skip_reason)), selecting node"
+        }
       } else {
-        Write-Log "auto: budget gate red ($($snap.skip_reason)), selecting node"
+        Write-Log "auto: no snapshot file, defaulting to node"
       }
     } else {
-      Write-Log "auto: no snapshot file, defaulting to node"
+      Write-Log "auto: estimator failed (exit=$estimatorExit), defaulting to node" 'warn'
     }
-  } else {
-    Write-Log "auto: estimator failed (exit=$estimatorExit), defaulting to node" 'warn'
-  }
 
-  $Engine = $resolvedEngine
-  Write-Log "auto: resolved engine=$Engine"
+    $Engine = $resolvedEngine
+    Write-Log "auto: resolved engine=$Engine"
+  }
 }
 
 if ($Engine -eq 'node') {
@@ -370,18 +395,22 @@ if ($Engine -eq 'node') {
 
   $snapshot = Get-Content $snapshotPath -Raw | ConvertFrom-Json
   if (-not $snapshot.dispatch_authorized) {
-    Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason), no-op exit 0"
+    if ($ForceBudget) {
+      Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason) but -ForceBudget set, proceeding" 'warn'
+    } else {
+      Write-Log "dispatch_authorized=false reason=$($snapshot.skip_reason), no-op exit 0"
 
-    Write-Jsonl @{
-      ts = (Get-Date).ToString('o')
-      run_id = $RunId
-      outcome = 'skipped'
-      reason = $snapshot.skip_reason
-      phase = 'estimator-gate'
-      wrapper_duration_sec = Get-DurationSec
+      Write-Jsonl @{
+        ts = (Get-Date).ToString('o')
+        run_id = $RunId
+        outcome = 'skipped'
+        reason = $snapshot.skip_reason
+        phase = 'estimator-gate'
+        wrapper_duration_sec = Get-DurationSec
+      }
+
+      exit 0
     }
-
-    exit 0
   }
 
   # ---- Phase 2: activity gate ----
