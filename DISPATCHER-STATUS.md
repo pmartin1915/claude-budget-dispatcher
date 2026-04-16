@@ -1,6 +1,6 @@
 # Dispatcher Status & Engine Guide
 
-> Last updated: 2026-04-16 (Part 8 session)
+> Last updated: 2026-04-16 (Part 11 session)
 
 ---
 
@@ -78,6 +78,47 @@ There are **two engines** that can run the pipeline. They share the same wrapper
 
 ---
 
+## System tray app
+
+A green/yellow/red dot lives next to your clock showing dispatcher health at a glance. No browser needed.
+
+| Icon color | Meaning |
+|---|---|
+| Green | Healthy -- dispatches running normally (free models or Claude authorized) |
+| Yellow | Paused -- you (or something) paused the dispatcher |
+| Red | Errors detected (2+ recent failures) or dashboard offline |
+
+**Right-click menu:**
+- **Open Dashboard** -- launches Chrome to the web UI (starts the dashboard if it's not already running)
+- **Engine: Auto / Free Only / Claude** -- switch engines instantly (checkmark shows current)
+- **Pause / Resume** -- toggle dispatching on/off
+- **Dispatch Now** -- trigger an immediate run
+- **Quit** -- close the tray app
+
+**Double-click** the icon to open the dashboard.
+
+**How it works:** `bin/BudgetDispatcher.exe` is a standalone Windows app (C# WinForms, compiled from `scripts/tray-app.cs`). It polls `localhost:7380/api/state` every 30 seconds and swaps the icon color based on what it finds. Shows as "Budget Dispatcher" in Task Manager and tray settings -- not "Windows PowerShell" like the old PowerShell version.
+
+**Pinning it:** Settings > Personalization > Taskbar > Other system tray icons > toggle "Budget Dispatcher" on. It auto-starts on login via a shortcut in `shell:startup`.
+
+**Rebuilding it:** If you ever need to recompile, run `scripts\build-tray.cmd`. It uses `csc.exe` that ships with Windows -- no SDK or Visual Studio needed.
+
+---
+
+## Desktop notifications
+
+When a dispatch completes, a Windows toast notification pops up in the corner and stays in your Notification Center. Useful overnight -- check your notifications in the morning to see what happened.
+
+| Toast shows | Example |
+|---|---|
+| Outcome | "Dispatch: success" or "Dispatch: error" |
+| Engine & duration | "Engine: node, Duration: 3s" |
+| Project & task | "Project: sandbox-canary-test, Task: tests-run" (pulled from the last JSONL line) |
+
+Skipped runs (user was active) stay silent -- no notification spam. The toast system uses the Windows WinRT notification API, zero dependencies.
+
+---
+
 ## How to switch between engines
 
 Both engines use the same mutex (`Global\claude-budget-dispatcher`), so they can't run simultaneously.
@@ -93,18 +134,22 @@ Both engines use the same mutex (`Global\claude-budget-dispatcher`), so they can
 
 The `BudgetDispatcher-Node` scheduled task uses `-Engine auto`. The old `ClaudeBudgetDispatcher` task is disabled and no longer needed.
 
-**Dashboard (recommended for switching):**
+**System tray (quickest):**
+Right-click the green dot next to your clock. Pick "Engine: Auto", "Engine: Free Only", or "Engine: Claude". Done.
+
+**Dashboard (full control):**
 ```bash
 node scripts/dashboard.mjs        # opens http://localhost:7380
 # Or: npm run dashboard
 ```
-The dashboard shows engine mode, budget state, last run, and recent logs. Click a button to switch engines instantly. The override persists in `config/budget.json` -- no admin privileges needed, works even when the dashboard isn't running.
+Six-tab web UI: Status (health beacon, scheduled task info, prediction), Budget (trajectory, sparkline), Projects (roster management), Logs (paginated, drill-down), Config (all settings), About (project charters). Click a button to switch engines instantly. The override persists in `config/budget.json` -- no admin privileges needed, works even when the dashboard isn't running. Auto-opens Chrome on startup.
 
 **CLI control (terminal alternative):**
 ```bash
 node scripts/control.mjs           # interactive menu
 # Or: npm run control
 ```
+10-option menu: engine switch, pause, dry-run toggle, real dispatch, prediction, log tail, open browser.
 
 **Config override (manual):**
 Set `"engine_override"` in `config/budget.json` to `"node"`, `"claude"`, or `null` (auto). The scheduled task reads this on every firing.
@@ -202,6 +247,9 @@ Set `"engine_override"` in `config/budget.json` to `"node"`, `"claude"`, or `nul
 | Budget estimate | Refreshed on every firing (even free-model runs) |
 | Worktree cleanup | Auto/* worktrees older than 7 days removed at startup |
 | Error visibility | All failure paths update JSONL + last-run.json + gist (`09e692c`) |
+| System tray | `bin/BudgetDispatcher.exe` -- auto-starts on login, green/yellow/red health dot |
+| Toast notifications | Windows desktop notifications on dispatch complete (success/error) |
+| Dashboard | `localhost:7380` -- 6-tab web UI, auto-opens Chrome, scheduled task health card |
 
 ---
 
@@ -242,6 +290,14 @@ The budget estimate is refreshed on every firing (even free-model runs), so the 
 
 ## Quick reference
 
+**Open the dashboard:** Double-click the green tray icon, or right-click > "Open Dashboard", or run `node scripts/dashboard.mjs`.
+
+**Switch engines:** Right-click tray icon > pick an engine. Or use the dashboard or CLI.
+
+**Pause everything:** Right-click tray icon > "Pause". Or create `config/PAUSED`. Or set `"paused": true` in `config/budget.json`.
+
+**Dispatch now:** Right-click tray icon > "Dispatch Now". Or use the dashboard button.
+
 **Manual test (bypasses activity gate):**
 ```bash
 GEMINI_API_KEY=$(powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('GEMINI_API_KEY','User')") \
@@ -249,10 +305,10 @@ MISTRAL_API_KEY=$(powershell -NoProfile -Command "[Environment]::GetEnvironmentV
 node scripts/dispatch.mjs
 ```
 
-**Pause everything:** Create `config/PAUSED` or set `"paused": true` in `config/budget.json`.
-
 **Check last run:** `cat status/budget-dispatch-last-run.json`
 
 **Check from laptop:** [Gist](https://gist.github.com/pmartin1915/655d02ce43b293cacdf333a301b63bbf)
+
+**Rebuild tray app:** `scripts\build-tray.cmd` (uses csc.exe built into Windows, no installs needed)
 
 **View recent log:** `tail -5 status/budget-dispatch-log.jsonl | node -e "process.stdin.on('data',d=>d.toString().split('\\n').filter(Boolean).forEach(l=>{try{console.log(JSON.parse(l))}catch{}}))"`
