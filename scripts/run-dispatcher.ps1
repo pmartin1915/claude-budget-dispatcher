@@ -372,6 +372,16 @@ if ($Engine -eq 'node') {
     Write-Log "claude binary (explicit): $ClaudePath"
   }
 
+  # Start-Process cannot execute .ps1 shims directly -- swap to .cmd
+  # sibling which cmd.exe handles natively. npm installs both.
+  if ($ClaudePath -like '*.ps1') {
+    $cmdPath = $ClaudePath -replace '\.ps1$', '.cmd'
+    if (Test-Path $cmdPath) {
+      Write-Log "swapping .ps1 shim to .cmd for Start-Process: $cmdPath"
+      $ClaudePath = $cmdPath
+    }
+  }
+
   # ---- Phase 1: estimator pre-check ----
   Write-Log "phase 1: running estimate-usage.mjs"
   $estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
