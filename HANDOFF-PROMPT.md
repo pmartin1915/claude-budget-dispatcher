@@ -42,7 +42,23 @@ The config format for projects_in_rotation is in config/budget.example.json.
 Each entry needs: slug, path (absolute), clinical_gate (bool),
 opportunistic_tasks (array of task strings).
 
-After projects are added:
+After existing repos are added, create greenfield "extra-sub-standalone" projects.
+These are NEW repos the AI builds from scratch over multiple dispatch cycles:
+- extra-sub-standalone-biz-app (business app/model tool)
+- extra-sub-standalone-game-adventure (a playable game)
+- extra-sub-standalone-dnd-math (D&D math game with lore and mechanics)
+- extra-sub-standalone-sand-physics (falling sand / particle physics game)
+- extra-sub-standalone-worldbuilder (worldbuilding: lore, maps, factions)
+
+Each gets: git init, CLAUDE.md (project charter), DISPATCH.md (tasks),
+STATE.md (continuity between cycles), ROADMAP.md (goals). Add to rotation.
+The model reads STATE.md each cycle to know what was done and what's next.
+First tasks: plan, scaffold. Then implement, audit, repeat. Over days/weeks
+these grow from empty repos into real applications.
+
+See HANDOFF.md "Priority 2" for full details and the self-improvement loop.
+
+Other future work:
 - WebSocket for live dashboard updates
 - Budget trend sparkline
 

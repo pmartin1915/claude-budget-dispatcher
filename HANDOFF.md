@@ -86,6 +86,44 @@ The dispatcher currently rotates between two sandbox repos. It needs real projec
 
 **Start with combo** (already cloned, has CLAUDE.md) -- it's the quickest win. Then add 2-3 more. Don't add all at once; verify each one dispatches successfully before adding the next.
 
+### Priority 2: Create greenfield "extra-sub-standalone" projects
+
+These are **new projects built from scratch by the dispatcher** over multiple dispatch cycles. Each one is a standalone repo that the AI bootstraps, scaffolds, and incrementally builds. The naming convention is `extra-sub-standalone-<slug>`. Existing examples: `extra-sub-standalone-canary-test`, `extra-sub-standalone-workflow-enhancement`.
+
+**Perry's wishlist -- create these 5 projects:**
+
+| Slug | What | First tasks |
+|------|------|-------------|
+| `biz-app` | A business application or business model tool | scaffold, plan, design |
+| `game-adventure` | A playable game (genre TBD by the model) | scaffold, plan, design, implement |
+| `dnd-math` | D&D-themed math game -- planning, lore, scaffolding, game mechanics | plan, worldbuild, scaffold, implement |
+| `sand-physics` | Sand/particle physics simulation game (like Noita or falling sand) | scaffold, plan, implement |
+| `worldbuilder` | Worldbuilding project -- lore, maps, factions, history, narrative | plan, worldbuild, docs-gen |
+
+**How to set up each one:**
+
+1. Create a new repo at `c:\Users\perry\DevProjects\sandbox\extra-sub-standalone-<slug>\`
+   - `git init`, create initial commit
+2. Create `CLAUDE.md` -- project charter explaining what this project is, the tech stack, the vision. This is what the model reads on every dispatch to understand the project.
+3. Create `DISPATCH.md` -- pre-approved tasks. Start with `plan` and `scaffold` tasks, then expand to `implement`, `tests-gen`, `audit` as the project grows.
+4. Create `STATE.md` -- empty initially, the dispatcher updates this after each run to track what's been done and what's next. This is how continuity works across dispatch cycles.
+5. Create `ROADMAP.md` -- high-level goals and milestones.
+6. Add to `projects_in_rotation` in `config/budget.json` with appropriate tasks.
+
+**The self-improvement loop:**
+```
+Dispatch cycle 1: plan (model reads CLAUDE.md, writes ROADMAP.md, STATE.md)
+Dispatch cycle 2: scaffold (creates project structure, package.json, etc.)
+Dispatch cycle 3: implement (picks a roadmap item, writes code, commits)
+Dispatch cycle 4: audit (reviews what was built, finds issues)
+Dispatch cycle 5: implement (fixes audit findings or adds next feature)
+...repeat indefinitely, each cycle building on the last
+```
+
+The model reads STATE.md to know what was done last time and what to do next. Each dispatch updates STATE.md so the next dispatch has context. Over days and weeks, these projects grow from empty repos into real applications.
+
+**Key:** The `extra-sub-standalone` projects use the structured subagent workflow from the sandbox-workflow-enhancement proposals (9-phase protocol: orient, plan, second opinion, execute, self-test, cross-model audit, fix, retest, commit). The `DISPATCH.md` complexity class determines which phases apply.
+
 ### Other next steps
 
 1. **WebSocket for live dashboard updates.** Replace 30s polling with file-watcher + push. Node's `node:fs.watch` on status/ + `node:http` upgrade to WebSocket (no dependency needed).
