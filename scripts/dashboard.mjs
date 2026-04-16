@@ -447,7 +447,7 @@ server.listen(PORT, "127.0.0.1", () => {
   const url = `http://localhost:${PORT}`;
   console.log(`Budget Dispatcher Dashboard running at ${url}`);
   console.log("Press Ctrl+C to stop.");
-  if (!NO_OPEN) exec(`start ${url}`);
+  if (!NO_OPEN) exec(`start chrome ${url}`);
 });
 
 // ---- HTML Page ----
