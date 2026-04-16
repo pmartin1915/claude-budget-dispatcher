@@ -414,28 +414,32 @@ if ($Engine -eq 'node') {
   }
 
   # ---- Phase 2: activity gate ----
-  Write-Log "phase 2: running check-idle.mjs"
-  $idleScript = Join-Path $RepoRoot 'scripts\check-idle.mjs'
-  $idleOutput = & node $idleScript 20 2>&1
-  $idleExit = $LASTEXITCODE
-  Write-Log "check-idle exit=$idleExit output=$idleOutput"
+  if ($ForceBudget) {
+    Write-Log "phase 2: activity gate bypassed (-ForceBudget)" 'warn'
+  } else {
+    Write-Log "phase 2: running check-idle.mjs"
+    $idleScript = Join-Path $RepoRoot 'scripts\check-idle.mjs'
+    $idleOutput = & node $idleScript 20 2>&1
+    $idleExit = $LASTEXITCODE
+    Write-Log "check-idle exit=$idleExit output=$idleOutput"
 
-  if ($idleExit -eq 1) {
-    Write-Log "user-active, skipping"
-    Write-Jsonl @{
-      ts = (Get-Date).ToString('o')
-      run_id = $RunId
-      outcome = 'skipped'
-      reason = 'user-active'
-      phase = 'activity-gate'
-      wrapper_duration_sec = Get-DurationSec
+    if ($idleExit -eq 1) {
+      Write-Log "user-active, skipping"
+      Write-Jsonl @{
+        ts = (Get-Date).ToString('o')
+        run_id = $RunId
+        outcome = 'skipped'
+        reason = 'user-active'
+        phase = 'activity-gate'
+        wrapper_duration_sec = Get-DurationSec
+      }
+      exit 0
     }
-    exit 0
-  }
 
-  if ($idleExit -eq 2) {
-    Write-Log "idle check errored, fail closed" 'error'
-    exit 2
+    if ($idleExit -eq 2) {
+      Write-Log "idle check errored, fail closed" 'error'
+      exit 2
+    }
   }
 
   # ---- Phase 3: claude -p invocation with retry ----

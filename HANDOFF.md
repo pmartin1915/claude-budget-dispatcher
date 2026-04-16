@@ -7,7 +7,7 @@
 - **Engine switching dashboard shipped (`c925524`).** `node scripts/dashboard.mjs` serves a dark-themed control panel at `http://localhost:7380`. Three engine buttons (Auto / Free Only / Claude), budget status, last run info, recent logs, pause/resume, and dispatch-now. Zero new npm dependencies -- uses Node's built-in `node:http` module. Auto-refreshes every 30s.
 - **Config-based engine override shipped (`c925524`).** `config/budget.json` now has `engine_override` field. Set to `"node"`, `"claude"`, or `null` (auto). The scheduled task reads this on every firing -- no admin privileges needed, no scheduled task edits required. The dashboard and CLI write this field.
 - **CLI control shipped (`c925524`).** `node scripts/control.mjs` -- interactive terminal menu for engine switching, pause/resume, and dry-run dispatch. Alternative to the web dashboard.
-- **`-ForceBudget` flag shipped (`c925524`).** `run-dispatcher.ps1 -ForceBudget` bypasses the budget gate for manual Claude engine validation. Never in the scheduled task. All other gates remain active.
+- **`-ForceBudget` flag shipped (`c925524`).** `run-dispatcher.ps1 -ForceBudget` bypasses the budget gate and activity gate for manual Claude engine validation. Never in the scheduled task. Mutex, daily quota, and PAUSED gates remain active.
 - **Claude engine NOT YET VALIDATED.** The flag exists but hasn't been used yet. First validation requires: `.\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude -ForceBudget` (will consume some Claude Max tokens).
 - **Scorecard: 36/36 done** (excluding S-1/S-2 which are infrastructure-gated on WSL2).
 - **`dry_run: false`** -- live, do NOT flip back to true.
@@ -61,7 +61,7 @@ run-dispatcher.ps1 -Engine auto
   +-- If Engine = 'auto': existing budget-adaptive resolution
   +-- If Engine = 'node': dispatch.mjs pipeline
   +-- If Engine = 'claude': estimator -> activity gate -> claude -p
-  +-- If -ForceBudget: skip budget gate for Claude engine
+  +-- If -ForceBudget: skip budget gate + activity gate for Claude engine
 ```
 
 ### Dashboard architecture

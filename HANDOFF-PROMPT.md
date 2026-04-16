@@ -23,7 +23,7 @@ This session (Part 9) shipped 1 commit:
 New tools available:
 - node scripts/dashboard.mjs   # web UI at localhost:7380
 - node scripts/control.mjs     # interactive CLI
-- -ForceBudget flag on run-dispatcher.ps1 (bypasses budget gate for Claude validation)
+- -ForceBudget flag on run-dispatcher.ps1 (bypasses budget + activity gates for Claude validation)
 - engine_override field in config/budget.json (instant engine switching, no admin)
 
 Remaining:

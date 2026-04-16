@@ -114,7 +114,7 @@ Set `"engine_override"` in `config/budget.json` to `"node"`, `"claude"`, or `nul
 # Override auto mode for testing:
 .\scripts\run-dispatcher.ps1 -RepoRoot . -Engine node    # force free models
 .\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude  # force Claude (budget gate still applies)
-.\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude -ForceBudget  # bypass budget gate (manual validation only)
+.\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude -ForceBudget  # bypass budget + activity gates (manual validation only)
 ```
 
 ---
