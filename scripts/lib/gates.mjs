@@ -15,7 +15,7 @@ const REPO_ROOT = resolve(__dirname, "..", "..");
  * Run all gate checks. Returns { proceed, reason } where proceed=false means
  * the dispatcher should skip this cycle.
  * @param {object} config - Parsed budget.json
- * @param {{ engine?: string }} [opts] - Options. engine="node" skips budget gate.
+ * @param {{ engine?: string, force?: boolean }} [opts] - Options. engine="node" skips budget gate. force=true skips activity gate (for manual testing).
  * @returns {{ proceed: boolean, reason: string|null }}
  */
 export function runGates(config, opts = {}) {
@@ -75,20 +75,24 @@ export function runGates(config, opts = {}) {
   }
 
   // Step 2: Activity gate — run check-idle.mjs
-  const idleScript = resolve(SCRIPTS_DIR, "check-idle.mjs");
-  const idleMinutes = config.activity_gate?.idle_minutes_required ?? 20;
-  try {
-    execFileSync("node", [idleScript, String(idleMinutes)], {
-      cwd: REPO_ROOT,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    // Exit 0 = idle, proceed
-  } catch (e) {
-    if (e.status === 1) {
-      return { proceed: false, reason: "user-active" };
+  if (opts.force) {
+    console.log("[gates] activity gate bypassed (--force)");
+  } else {
+    const idleScript = resolve(SCRIPTS_DIR, "check-idle.mjs");
+    const idleMinutes = config.activity_gate?.idle_minutes_required ?? 20;
+    try {
+      execFileSync("node", [idleScript, String(idleMinutes)], {
+        cwd: REPO_ROOT,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 30_000,
+      });
+      // Exit 0 = idle, proceed
+    } catch (e) {
+      if (e.status === 1) {
+        return { proceed: false, reason: "user-active" };
+      }
+      return { proceed: false, reason: "activity-gate-error" };
     }
-    return { proceed: false, reason: "activity-gate-error" };
   }
 
   // Step 3: Daily quota

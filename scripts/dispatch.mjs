@@ -5,8 +5,10 @@
 // that calls Gemini/Mistral APIs directly. Zero Claude dependency at runtime.
 //
 // Usage:
-//   node scripts/dispatch.mjs              # full run
+//   node scripts/dispatch.mjs              # full run (requires 20 min idle)
 //   node scripts/dispatch.mjs --dry-run    # gates + selector + router, no work
+//   node scripts/dispatch.mjs --force      # bypass activity gate, do real work
+//   node scripts/dispatch.mjs --force --dry-run  # full pipeline inspect, no commit
 //
 // Environment variables:
 //   GEMINI_API_KEY  — Google AI Gemini API key (free tier)
@@ -74,15 +76,16 @@ async function main() {
   globalStartMs = startMs;
   const config = loadConfig();
   const dryRun = config.dry_run === true || process.argv.includes("--dry-run");
+  const force = process.argv.includes("--force");
 
-  console.log("[dispatch] starting (engine=dispatch.mjs)");
+  console.log(`[dispatch] starting (engine=dispatch.mjs${force ? ", force" : ""}${dryRun ? ", dry-run" : ""})`);
 
   // Housekeeping: rotate old log entries (R-5)
   rotateLog();
 
   // Phase 1: Gates (0 tokens)
   console.log("[dispatch] phase 1: gates");
-  const gateResult = runGates(config, { engine: "node" });
+  const gateResult = runGates(config, { engine: "node", force });
   if (!gateResult.proceed) {
     console.log(`[dispatch] gated: ${gateResult.reason}`);
     appendLog({
