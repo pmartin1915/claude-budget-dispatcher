@@ -115,8 +115,8 @@ export async function executeWork(selection, route, config, clients, worktreePat
         route.taskClass,
         projectPath,
         projectConfig,
-        clients.gemini,
-        route.model
+        clients,
+        route.candidates ?? [route.model],
       );
 
     case "tests_gen":
@@ -126,7 +126,7 @@ export async function executeWork(selection, route, config, clients, worktreePat
         projectPath,
         projectConfig,
         clients,
-        route.model
+        route.candidates ?? [route.model],
       );
 
     case "docs_gen":
@@ -134,8 +134,8 @@ export async function executeWork(selection, route, config, clients, worktreePat
         task,
         projectPath,
         projectConfig,
-        clients.mistral,
-        route.model
+        clients,
+        route.candidates ?? [route.model],
       );
 
     default:
@@ -181,7 +181,7 @@ async function executeLocalTask(task, projectPath) {
 // Gemini tasks (audit, explore, research) — read-only analysis
 // ---------------------------------------------------------------------------
 
-async function executeGeminiTask(task, taskClass, projectPath, projectConfig, gemini, model) {
+async function executeGeminiTask(task, taskClass, projectPath, projectConfig, clients, candidates) {
   const files = gatherFilesForAnalysis(projectPath, task);
   if (files.length === 0) {
     return { outcome: "skipped", reason: "no-files-to-analyze" };
@@ -190,18 +190,8 @@ async function executeGeminiTask(task, taskClass, projectPath, projectConfig, ge
   const prompt = buildAnalysisPrompt(task, taskClass, files, projectConfig);
 
   try {
-    await throttleFor("gemini"); // I-2: free-tier rate limit
-    const response = await withTimeout( // I-4
-      gemini.models.generateContent({
-        model,
-        contents: prompt,
-        config: { temperature: 0.2, maxOutputTokens: 4000 },
-      }),
-      API_TIMEOUT_MS,
-      `executeGeminiTask(${model})`,
-    );
-
-    const text = response.text;
+    // C-5: try primary model, fall back to alternatives on 503/5xx
+    const { text, model: usedModel } = await callModelWithFallback(clients, candidates, prompt);
 
     // For audit tasks, write findings to a file in the worktree
     if (taskClass === "audit") {
@@ -212,6 +202,7 @@ async function executeGeminiTask(task, taskClass, projectPath, projectConfig, ge
         summary: `audit complete, findings written`,
         filesChanged: [relative(projectPath, findingsPath)],
         auditText: text,
+        modelUsed: usedModel,
       };
     }
 
@@ -223,6 +214,7 @@ async function executeGeminiTask(task, taskClass, projectPath, projectConfig, ge
       outcome: "success",
       summary: `${task} complete`,
       filesChanged: [relative(projectPath, logPath)],
+      modelUsed: usedModel,
     };
   } catch (e) {
     return { outcome: "error", reason: `gemini-${task}-error: ${e.message}` };
@@ -233,7 +225,7 @@ async function executeGeminiTask(task, taskClass, projectPath, projectConfig, ge
 // Codegen tasks (tests-gen, refactor, clean) — 3-step generate-verify-audit
 // ---------------------------------------------------------------------------
 
-async function executeCodegenTask(task, projectPath, projectConfig, clients, model) {
+async function executeCodegenTask(task, projectPath, projectConfig, clients, candidates) {
   const files = gatherFilesForCodegen(projectPath, task);
   if (files.length === 0) {
     return { outcome: "skipped", reason: "no-files-for-codegen" };
@@ -249,10 +241,13 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
 
   const prompt = buildCodegenPrompt(task, files, projectConfig);
 
-  // Step 1: Generate
+  // Step 1: Generate — C-5: try candidates in order on 503/5xx
   let generatedText;
+  let usedModel;
   try {
-    generatedText = await callModel(clients, model, prompt);
+    const result = await callModelWithFallback(clients, candidates, prompt);
+    generatedText = result.text;
+    usedModel = result.model;
   } catch (e) {
     return { outcome: "error", reason: `codegen-generate-error: ${e.message}` };
   }
@@ -282,7 +277,8 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
     // One retry with error context
     const fixPrompt = buildFixPrompt(task, files, parsedFiles, testResult.stderr);
     try {
-      const fixedText = await callModel(clients, model, fixPrompt);
+      // Pin fix step to the model that generated the code (don't restart fallback walk)
+      const fixedText = await callModel(clients, usedModel, fixPrompt);
       const fixedFiles = parseFileOutput(fixedText);
       if (!fixedFiles || fixedFiles.length === 0) {
         revertChanges(projectPath);
@@ -316,7 +312,7 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
   // Step 3: Audit (Gemini codereview, free)
   try {
     const changedFiles = getChangedFiles(projectPath);
-    const auditResult = await auditChanges(clients, changedFiles, projectPath, model);
+    const auditResult = await auditChanges(clients, changedFiles, projectPath, usedModel);
     if (auditResult.hasCritical) {
       revertChanges(projectPath);
       return { outcome: "reverted", reason: "audit-critical-finding", auditResult };
@@ -326,6 +322,7 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
       summary: `${task}: ${parsedFiles.length} file(s) generated, tests pass, audit clean`,
       filesChanged: changedFiles,
       auditResult,
+      modelUsed: usedModel,
     };
   } catch {
     // Audit failure is non-fatal — proceed with commit
@@ -334,6 +331,7 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
       outcome: "success",
       summary: `${task}: ${parsedFiles.length} file(s) generated, tests pass, audit skipped`,
       filesChanged: changedFiles,
+      modelUsed: usedModel,
     };
   }
 }
@@ -342,7 +340,7 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, mod
 // Docs tasks (docs-gen, jsdoc, session-log) — Mistral Large
 // ---------------------------------------------------------------------------
 
-async function executeDocsTask(task, projectPath, projectConfig, mistral, model) {
+async function executeDocsTask(task, projectPath, projectConfig, clients, candidates) {
   const files = gatherFilesForDocs(projectPath, task);
   if (files.length === 0) {
     return { outcome: "skipped", reason: "no-files-for-docs" };
@@ -361,19 +359,8 @@ async function executeDocsTask(task, projectPath, projectConfig, mistral, model)
   const prompt = buildDocsPrompt(task, files, projectConfig);
 
   try {
-    await throttleFor("mistral"); // I-2: free-tier rate limit
-    const response = await withTimeout( // I-4
-      mistral.chat.complete({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-        maxTokens: 4000,
-      }),
-      API_TIMEOUT_MS,
-      `executeDocsTask(${model})`,
-    );
-
-    const text = response.choices?.[0]?.message?.content ?? "";
+    // C-5: try primary model, fall back to alternatives on 503/5xx
+    const { text, model: usedModel } = await callModelWithFallback(clients, candidates, prompt);
     const parsedFiles = parseFileOutput(text);
 
     if (parsedFiles && parsedFiles.length > 0) {
@@ -382,6 +369,7 @@ async function executeDocsTask(task, projectPath, projectConfig, mistral, model)
         outcome: "success",
         summary: `${task}: ${parsedFiles.length} file(s) updated`,
         filesChanged: parsedFiles.map((f) => f.path),
+        modelUsed: usedModel,
       };
     }
 
@@ -393,6 +381,7 @@ async function executeDocsTask(task, projectPath, projectConfig, mistral, model)
       outcome: "success",
       summary: `${task}: output written`,
       filesChanged: [relative(projectPath, outputPath)],
+      modelUsed: usedModel,
     };
   } catch (e) {
     return { outcome: "error", reason: `docs-gen-error: ${e.message}` };
@@ -436,6 +425,40 @@ async function callModel(clients, model, prompt) {
     `callModel(${model})`,
   );
   return r.choices?.[0]?.message?.content ?? "";
+}
+
+/**
+ * Try calling each candidate model in order until one succeeds (C-5).
+ * Falls back to the next candidate on 429 (rate-limit) or 5xx (server error).
+ * Non-retryable errors (4xx, parse errors) fail immediately.
+ * @param {{ gemini: object, mistral: object }} clients
+ * @param {string[]} candidates - Ordered model list from router
+ * @param {string} prompt
+ * @returns {Promise<{ text: string, model: string }>}
+ */
+async function callModelWithFallback(clients, candidates, prompt) {
+  let lastError;
+  for (const model of candidates) {
+    try {
+      const text = await callModel(clients, model, prompt);
+      return { text, model };
+    } catch (e) {
+      lastError = e;
+      const status = e.status ?? e.statusCode ?? e.httpStatusCode ?? 0;
+      const msg = e.message ?? "";
+      // Retry on rate-limit (429) or server errors (5xx); also match
+      // status codes embedded in error messages by some SDKs.
+      if (status === 429 || (status >= 500 && status < 600) ||
+          /\b(429|50[0-9]|51[0-9]|52[0-9]|53[0-9])\b/.test(msg)) {
+        console.warn(`[worker] ${model} returned ${status || "5xx"}, trying next candidate`);
+        continue;
+      }
+      // Non-retryable (4xx, parse, timeout, etc.) — don't try other candidates
+      throw e;
+    }
+  }
+  // All candidates exhausted
+  throw lastError;
 }
 
 /** Gather files for analysis tasks (audit, explore, research). */

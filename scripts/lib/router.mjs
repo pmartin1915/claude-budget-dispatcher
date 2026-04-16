@@ -42,7 +42,7 @@ export function resolveModel(task, roster) {
 
   // Local tasks run without any LLM
   if (taskClass === "local") {
-    return { delegate_to: "local", model: null, taskClass };
+    return { delegate_to: "local", model: null, taskClass, candidates: [] };
   }
 
   // Claude-only tasks are forbidden in dispatch.mjs (no Claude available)
@@ -52,6 +52,7 @@ export function resolveModel(task, roster) {
       model: null,
       taskClass,
       reason: "claude-only-task",
+      candidates: [],
     };
   }
 
@@ -71,18 +72,23 @@ export function resolveModel(task, roster) {
 
   const forbiddenSet = new Set(roster.forbidden_models ?? []);
 
-  // Walk candidates, pick first that passes all checks
+  // Walk candidates, collect all viable models for fallback (C-5)
+  const viable = [];
   for (const model of candidates) {
     if (roster.allow_only_listed_models && !allowedSet.has(model)) continue;
     if (forbiddenSet.has(model)) continue;
-    return { delegate_to: model, model, taskClass };
+    viable.push(model);
   }
 
-  // No viable candidate
-  return {
-    delegate_to: "skip",
-    model: null,
-    taskClass,
-    reason: "no-viable-free-model",
-  };
+  if (viable.length === 0) {
+    return {
+      delegate_to: "skip",
+      model: null,
+      taskClass,
+      reason: "no-viable-free-model",
+      candidates: [],
+    };
+  }
+
+  return { delegate_to: viable[0], model: viable[0], taskClass, candidates: viable };
 }
