@@ -64,7 +64,50 @@ scripts/tray.ps1 (WinForms, runs at login via shell:startup)
 
 ## Part 11: what's left
 
-### High-value next steps
+### Priority 1: Polish the tray app into a standalone .exe
+
+The tray app works but shows as "Windows PowerShell" in the system tray settings, which makes it impossible to pin without knowing that. It should be a proper named app.
+
+**Problem:** PowerShell-hosted WinForms apps inherit PowerShell's identity. The tray icon appears as "Windows PowerShell" in Settings > Taskbar > Other system tray icons. Users can't drag it to the visible taskbar area on Windows 11 -- they have to find "Windows PowerShell" in settings and toggle it. This is not a smooth experience.
+
+**Solution:** Compile a standalone `.exe` using `csc.exe` (C# compiler, ships with .NET Framework on every Windows machine). The .exe would:
+- Show as **"Budget Dispatcher"** in Task Manager and tray settings
+- Have its own icon (the green dot .ico already exists in `assets/`)
+- Be a proper Windows app -- no PowerShell window, no "Windows PowerShell" label
+- Same functionality: NotifyIcon, context menu, polling, icon color swap
+
+**Implementation approach:**
+1. Create `scripts/tray-app.cs` -- a small C# WinForms app (~200 lines) that does exactly what `tray.ps1` does: NotifyIcon, ContextMenuStrip, Timer polling `/api/state`, icon color swap, menu actions via WebClient POST.
+2. Create `scripts/build-tray.cmd` -- one-line build script: `csc.exe /target:winexe /win32icon:assets\tray-green.ico /out:bin\BudgetDispatcher.exe scripts\tray-app.cs /r:System.Windows.Forms.dll /r:System.Drawing.dll`
+3. The resulting `bin/BudgetDispatcher.exe`:
+   - Shows as "BudgetDispatcher" (or "Budget Dispatcher" via AssemblyTitle attribute) in tray settings
+   - Has the green dot as its app icon
+   - `/target:winexe` means no console window at all
+   - Can be pinned to taskbar, added to startup, etc.
+4. Update the `shell:startup` shortcut to point to the .exe instead of `powershell -File tray.ps1`
+5. Keep `tray.ps1` as a fallback/reference but the .exe is the primary
+
+**Key details for the C# port:**
+- `HttpWebRequest`/`WebClient` for API calls (built into .NET Framework)
+- `System.Windows.Forms.NotifyIcon` with `ContextMenuStrip` (same as PS1)
+- `System.Windows.Forms.Timer` for 30s polling (same as PS1)
+- `Mutex` for single-instance guard (same pattern)
+- `Icon` loading from `.ico` files in `assets/` (relative to .exe path)
+- `Process.Start("chrome", url)` for opening dashboard
+- `Process.Start(launcherPath)` for "Open Dashboard" with auto-start
+
+**What stays the same:** The 3 `.ico` files, the `dashboard-launcher.cmd`, the dashboard API endpoints, the polling/status logic. The C# is a straight port of the PowerShell.
+
+**What to test:**
+- `scripts\build-tray.cmd` produces `bin\BudgetDispatcher.exe`
+- Double-click the .exe -- tray icon appears with "BudgetDispatcher" identity
+- Settings > Taskbar > Other system tray icons shows "BudgetDispatcher" (not "Windows PowerShell")
+- Toggle it on -- icon is always visible, green dot next to clock
+- Right-click menu works, "Open Dashboard" opens Chrome
+- Quit, then re-launch -- single instance guard works
+- Restart Windows -- startup shortcut launches the .exe automatically
+
+### Other next steps
 
 1. **Add Perry's iOS apps to project rotation.** Repos are on laptop, available at github.com/pmartin1915. Clone them to DevProjects, create `DISPATCH.md` and `CLAUDE.md`, add to `projects_in_rotation` in `config/budget.json`. Start with `audit` as first task.
 
