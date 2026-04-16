@@ -36,9 +36,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const CONFIG_PATH = resolve(REPO_ROOT, "config", "budget.json");
 
+class DieError extends Error {
+  constructor(msg) { super(msg); this.name = "DieError"; }
+}
+
 function die(msg) {
   console.error(`[dispatch] FATAL: ${msg}`);
-  process.exit(2);
+  process.exitCode = 2;
+  throw new DieError(msg);
 }
 
 function loadConfig() {
@@ -85,7 +90,7 @@ async function main() {
       engine: "dispatch.mjs",
     });
     writeLastRun({ outcome: "skipped", reason: gateResult.reason }, Date.now() - startMs);
-    process.exit(0);
+    return;
   }
 
   // R-7: remove stale .git/index.lock files from rotation project clones.
@@ -115,7 +120,7 @@ async function main() {
       engine: "dispatch.mjs",
     });
     writeLastRun({ outcome: "skipped", reason: "selector-failed" }, Date.now() - startMs);
-    process.exit(0);
+    return;
   }
 
   console.log(
@@ -140,7 +145,7 @@ async function main() {
       engine: "dispatch.mjs",
     });
     writeLastRun({ outcome: "skipped", reason: route.reason }, Date.now() - startMs);
-    process.exit(0);
+    return;
   }
 
   // Dry-run exit point
@@ -157,7 +162,7 @@ async function main() {
       engine: "dispatch.mjs",
     });
     writeLastRun({ outcome: "dry-run" }, Date.now() - startMs);
-    process.exit(0);
+    return;
   }
 
   // Phase 4: Worker (free-tier tokens)
@@ -215,13 +220,21 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(`[dispatch] unhandled error: ${e.stack || e.message}`);
-  appendLog({
-    outcome: "error",
-    reason: e.message,
-    phase: "unhandled",
-    engine: "dispatch.mjs",
+main()
+  .catch((e) => {
+    if (e instanceof DieError) return; // already logged by die(), exitCode already set
+    console.error(`[dispatch] unhandled error: ${e.stack || e.message}`);
+    appendLog({
+      outcome: "error",
+      reason: e.message,
+      phase: "unhandled",
+      engine: "dispatch.mjs",
+    });
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // Give the event loop one tick to drain pending HTTP handles (libuv crash fix).
+    // Without this, process.exit() fires while @google/genai keep-alive handles
+    // are still closing, risking a libuv UV_HANDLE_CLOSING assertion.
+    setImmediate(() => process.exit(process.exitCode ?? 0));
   });
-  process.exit(1);
-});
