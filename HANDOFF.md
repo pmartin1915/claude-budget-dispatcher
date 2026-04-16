@@ -1,8 +1,100 @@
-# Handoff -- PC Claude instance (Part 12 -- 2026-04-16)
+# Handoff -- PC Claude instance (Part 13 -- 2026-04-16)
 
-> **READ THIS FIRST.** Part 12 supersedes all previous parts. Parts 5-11 are historical context below.
+> **READ THIS FIRST.** Part 13 supersedes all previous parts. Parts 5-12 are historical context below.
 
-## Part 12: TL;DR for next instance
+## Part 13: TL;DR for next instance
+
+- **11 projects in rotation** (was 2). 4 real repos (combo, boardbound, shortless-ios, wilderness) + 2 existing sandboxes + 5 new greenfield sandboxes (biz-app, game-adventure, dnd-game, sand-physics, worldbuilder).
+- **Per-project model routing shipped** (`b1e66d8`, laptop). `project_overrides` in budget.json with per-task fallback chains. boardbound uses Flash for explore, Pro for audit. combo/shortless-ios have Pro-first routing. Ollama models as codegen fallback.
+- **Multi-provider support shipped** (`b1e66d8`, laptop). provider.mjs handles Gemini/Mistral/Groq/OpenRouter/Ollama via unified `callProvider()`. Budget.json `providers` block configures endpoints and throttles.
+- **Ollama installed and running** on PC. Vulkan enabled (AMD RDNA2). 3 models pulled: `qwen2.5-coder:7b` (4.7 GB), `qwen2.5-coder:14b` (9.0 GB), `devstral-small-2:24b` (15 GB). Listens on `0.0.0.0:11434` for Optiplex thin-client access.
+- **Groq and OpenRouter keys NOT SET.** Perry needs to sign up and add env vars manually. Dispatch works without them (informational warning only).
+- **dnd-game and worldbuilder bridge** set up. Both CLAUDE.md files reference each other as sister projects. Worldbuilder produces lore; dnd-game consumes it via lore adapter interface.
+- **All previous state unchanged.** `dry_run: false`, auto mode active, tray app running, 11 projects verified with `--force --dry-run`.
+
+## Part 13: what was done (2026-04-16)
+
+### Session 1: Projects and rotation expansion
+
+| Action | What | Details |
+|--------|------|---------|
+| combo | Created DISPATCH.md, added to config | Committed to combo repo (`0a3cb92`) |
+| boardbound | Cloned from GitHub, added to config | Already had CLAUDE.md + DISPATCH.md + ai/STATE.md |
+| shortless-ios | Cloned, created CLAUDE.md + DISPATCH.md + ai/STATE.md | Committed (`dfaa2ab`), audit/explore/docs-gen only (Swift, no npm test) |
+| wilderness | Cloned from GitHub, added to config | Already had CLAUDE.md + DISPATCH.md + ai/STATE.md |
+| biz-app | Greenfield scaffold + git init | `c74e3f2` -- business tool, model chooses which |
+| game-adventure | Greenfield scaffold + git init | `c3d2cc5` -- playable game, genre TBD |
+| dnd-game | Greenfield scaffold + git init | `c6d3c93` -- real D&D game, teaching toggle, bridges to worldbuilder |
+| sand-physics | Greenfield scaffold + git init | `8c0e679` -- falling sand sim (Noita-style) |
+| worldbuilder | Greenfield scaffold + git init | `fce36b7` -- GoT/Skyrim worldbuilding, bridges to dnd-game |
+
+### Session 2: Multi-provider integration (PC-side config)
+
+| Action | What |
+|--------|------|
+| Pulled `b1e66d8` | Per-project routing + multi-provider support from laptop |
+| Added `providers` block | groq (6s throttle), openrouter (10s), ollama (0ms) |
+| Added `project_overrides` | boardbound (Flash explore, Pro audit, Ollama codegen fallback), combo (Pro for clinical, Ollama fallback), shortless-ios (Pro for Swift) |
+| Installed Ollama 0.20.7 | Via winget, OLLAMA_VULKAN=1, OLLAMA_HOST=0.0.0.0:11434 |
+| Pulled 3 models | qwen2.5-coder:7b, qwen2.5-coder:14b, devstral-small-2:24b |
+| Verified provider.mjs -> Ollama | `callProvider("local/qwen2.5-coder:7b", ...)` returns correct response |
+
+### Routing matrix (live in budget.json)
+
+| Project | explore | audit | tests_gen | docs_gen | audit_model |
+|---------|---------|-------|-----------|----------|-------------|
+| **boardbound** | Flash > Pro | Pro | Codestral > Ollama:14b | Mistral > Flash | tests: Pro, refactor: Mistral |
+| **combo** | Pro | Pro | Codestral > Ollama:14b | Mistral | tests: Pro |
+| **shortless-ios** | Pro | Pro | (not in tasks) | Pro > Mistral | -- |
+| **wilderness** | (global) | (global) | (global) | (global) | auto C-1 |
+| **all sandboxes** | (global) | (global) | (global) | (global) | auto C-1 |
+
+Global defaults: explore/audit/research -> gemini-2.5-pro, tests_gen/refactor -> codestral-latest, docs_gen -> mistral-large-latest. Fallback: Pro > Flash > Mistral.
+
+## Part 13: what's left
+
+### Perry manual steps (can't be automated)
+
+1. **Groq API key.** Sign up at https://console.groq.com. Free tier, no credit card. Then:
+   ```powershell
+   [Environment]::SetEnvironmentVariable('GROQ_API_KEY', 'gsk_YOUR_KEY_HERE', 'User')
+   ```
+   Test: `node -e "import('./scripts/lib/provider.mjs').then(m => m.callProvider({gemini:null,mistral:null}, {groq:{base_url:'https://api.groq.com/openai/v1',env_key:'GROQ_API_KEY'}}, 'groq/llama-3.3-70b-versatile', 'Say hello').then(console.log))"`
+
+2. **OpenRouter API key** (optional). Sign up at https://openrouter.ai. Then:
+   ```powershell
+   [Environment]::SetEnvironmentVariable('OPENROUTER_API_KEY', 'sk-or-YOUR_KEY', 'User')
+   ```
+
+### Next priorities
+
+1. **Let the dispatcher run overnight with 11 projects.** Monitor the log: `tail -20 status/budget-dispatch-log.jsonl`. The selector should distribute across projects, prioritizing never-dispatched ones first.
+2. **Add Groq models to fallback chains** once the key is set. E.g. `"groq/llama-3.3-70b-versatile"` in boardbound's tests_gen chain.
+3. **Add burn-wizard to rotation** (mentioned in task list but not yet cloned/configured). Clone from `github.com/pmartin1915/burn-wizard`, create DISPATCH.md, add to config.
+4. **Verify Ollama under Vulkan.** The `OLLAMA_VULKAN=1` env var was set for User scope but Ollama was installed and auto-started before the var was set. May need a restart: right-click Ollama tray icon > Quit, then relaunch. Check GPU usage with Task Manager > Performance > GPU during inference.
+5. **Optiplex thin-client test.** From the Optiplex, `curl http://<PC-IP>:11434/v1/chat/completions ...` should work since OLLAMA_HOST=0.0.0.0. May need Windows Firewall inbound rule for port 11434.
+
+## Part 13: things NOT to do
+
+- Do not modify provider.mjs, router.mjs, throttle.mjs, worker.mjs, dispatch.mjs (laptop owns code changes).
+- Do not flip `dry_run` back to `true`.
+- Do not use `gemini-3-pro-preview` (bills Google Cloud).
+- Do not commit `config/budget.json` (gitignored).
+- Before any commit to tracked repos: run `mcp__pal__codereview` with model `gemini-2.5-pro`.
+- Do not kill Ollama service unless testing Vulkan restart.
+
+## Part 13: gotchas
+
+19. **Ollama auto-starts on login.** The installer creates a startup entry. If you need to restart with new env vars, quit via tray icon and relaunch from Start menu.
+20. **`local/` prefix required.** In budget.json, Ollama models must be prefixed with `local/` (e.g. `"local/qwen2.5-coder:14b"`). `providerFor()` in provider.mjs routes based on this prefix.
+21. **Groq/OpenRouter warnings are informational.** `[dispatch] provider "groq" configured but GROQ_API_KEY not set` appears on every dry-run. It doesn't block dispatch. The warning disappears once the key is in the environment.
+22. **boardbound has no `src/` directory.** Source lives in `app/`, `lib/`, `components/`. The `NEEDS_SRC` filter in context.mjs means `tests-gen`, `docs-gen`, `refactor`, `clean` are auto-filtered for boardbound. Only `audit` and `explore` will fire until the project gets a `src/` directory or context.mjs is updated.
+23. **shortless-ios `docs-gen` is also filtered.** Same `NEEDS_SRC` issue -- Swift source is in `ShortlessApp/`, not `src/`. Only `audit` and `explore` will fire. This is intentional and noted in the DISPATCH.md.
+24. **devstral-small-2:24b is 15 GB.** Loading it takes ~30s on first call (GPU memory allocation). Subsequent calls are fast. The 14b qwen model is the better default for codegen fallback (faster load, good quality).
+
+---
+
+## Part 12: TL;DR for next instance (superseded by Part 13)
 
 - **Standalone tray .exe shipped (`1e26a58`, `6695d2d`).** `bin/BudgetDispatcher.exe` compiled from `scripts/tray-app.cs` via `csc.exe` (C# 5, .NET Framework, zero installs). Shows as "Budget Dispatcher" in Task Manager and tray settings. Green/yellow/red dot. Same functionality as `tray.ps1` -- exact behavioral port. Startup shortcut updated. Ran 8+ hours overnight without a crash.
 - **Icon fix (`6695d2d`).** Original icons were 4-bit (GetHicon drops ARGB). Rewrote `tray-icons.ps1` to embed PNG data directly in ICO format -- proper 32-bit with transparency.
