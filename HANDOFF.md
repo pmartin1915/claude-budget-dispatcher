@@ -96,9 +96,30 @@ These are **new projects built from scratch by the dispatcher** over multiple di
 |------|------|-------------|
 | `biz-app` | A business application or business model tool | scaffold, plan, design |
 | `game-adventure` | A playable game (genre TBD by the model) | scaffold, plan, design, implement |
-| `dnd-math` | D&D-themed math game -- planning, lore, scaffolding, game mechanics | plan, worldbuild, scaffold, implement |
+| `dnd-game` | A real D&D game with balanced mechanics (see detailed spec below) | plan, scaffold, implement |
 | `sand-physics` | Sand/particle physics simulation game (like Noita or falling sand) | scaffold, plan, implement |
-| `worldbuilder` | Worldbuilding project -- lore, maps, factions, history, narrative | plan, worldbuild, docs-gen |
+| `worldbuilder` | Worldbuilding: grounded, realistic lore (see detailed spec below) | plan, worldbuild, docs-gen |
+
+**Detailed spec: `dnd-game`**
+
+This is NOT a math-teaching app. It's a **real, playable D&D game** with proper balanced mechanics -- dice rolls, stat modifiers, combat, encounters, leveling. It can start text-based (terminal or simple web UI). The game should feel like an actual D&D session, not a classroom exercise.
+
+- Real D&D-style mechanics: d20 rolls, ability scores, AC, saving throws, initiative, etc.
+- Balanced encounters with actual challenge ratings
+- Character creation, progression, inventory
+- **Teaching toggle:** An optional mode (off by default) that, when enabled, shows the math behind what just happened -- "You rolled 14 + 3 STR modifier = 17, beating the goblin's AC of 15." When off, it just says "You hit the goblin." The toggle should feel like a coach whispering in your ear, not a textbook interrupting the game.
+- The goal is: someone who has never played D&D can turn the toggle on and learn how it works by playing. Someone who already knows can turn it off and just enjoy the game.
+
+**Detailed spec: `worldbuilder`**
+
+Grounded, "realistic" worldbuilding in the tone of **Game of Thrones** and **Skyrim** -- political intrigue, geography that makes sense, factions with believable motivations, history with cause and effect. Not high-fantasy cartoon. Think: a world that could support a serious RPG campaign.
+
+- Lore documents: history, geography, factions, notable figures, religions, economy
+- Internal consistency -- if a kingdom is landlocked, it doesn't have a navy
+- Maps (text-based descriptions initially, can be visualized later)
+- Designed to eventually be used BY the dnd-game project as its setting
+
+**Bridge between dnd-game and worldbuilder:** These two projects are designed to merge later. The worldbuilder creates the setting; the dnd-game uses it. For now they develop independently, but their CLAUDE.md files should reference each other so the models know the connection exists.
 
 **How to set up each one:**
 
