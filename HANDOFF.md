@@ -1,216 +1,100 @@
-# Handoff -- PC Claude instance (Part 11 -- 2026-04-16)
+# Handoff -- PC Claude instance (Part 12 -- 2026-04-16)
 
-> **READ THIS FIRST.** Part 11 supersedes all previous parts. Parts 5-10 are historical context below.
+> **READ THIS FIRST.** Part 12 supersedes all previous parts. Parts 5-11 are historical context below.
 
-## Part 11: TL;DR for next instance
+## Part 12: TL;DR for next instance
 
-- **Desktop toast notifications shipped (`913464c`).** Windows WinRT toast API, zero deps. Fires on success/error/timeout from the PS1 `finally` block. Enriches with project/task from last JSONL line. Skips stay silent (~70/day). Tested live -- toast appears in Notification Center.
-- **Scheduled task health check in dashboard (`913464c`).** New "Scheduled Task" card in Status tab. Shows state (Ready/Disabled/NotFound), next run, last run, last result. Cached 60s via `execFileSync` to PowerShell. Green/yellow/red indicators.
-- **Auto-open browser on dashboard start (`913464c`).** `exec('start ...')` after `server.listen`. `--no-open` flag to suppress. Works on Windows via `start` shell builtin.
-- **System tray app shipped (`186f0da`).** PowerShell + WinForms NotifyIcon, zero deps. Green/yellow/red dot in system tray. Right-click menu: Open Dashboard (Chrome), Engine switch, Pause/Resume, Dispatch Now, Quit. Polls `/api/state` every 30s. Single-instance mutex. Auto-starts on login via `shell:startup` shortcut.
-- **Dashboard launcher** (`dashboard-launcher.cmd`). Checks if dashboard is running (TCP probe), starts it if not, opens Chrome. Used by tray app's "Open Dashboard" and pinnable as standalone shortcut.
-- **Code reviewed by Gemini 2.5 Pro (2 rounds).** Pause toggle logic fixed (was always unpausing), resource disposal added, parseInt fallback corrected.
+- **Standalone tray .exe shipped (`1e26a58`, `6695d2d`).** `bin/BudgetDispatcher.exe` compiled from `scripts/tray-app.cs` via `csc.exe` (C# 5, .NET Framework, zero installs). Shows as "Budget Dispatcher" in Task Manager and tray settings. Green/yellow/red dot. Same functionality as `tray.ps1` -- exact behavioral port. Startup shortcut updated. Ran 8+ hours overnight without a crash.
+- **Icon fix (`6695d2d`).** Original icons were 4-bit (GetHicon drops ARGB). Rewrote `tray-icons.ps1` to embed PNG data directly in ICO format -- proper 32-bit with transparency.
+- **Gemini 2.5 Pro code review applied.** Resource disposal for Font/ContextMenuStrip/Timer, consolidated cleanup (Quit just calls Application.Exit), error log iteration matches PS1 behavior.
+- **DISPATCHER-STATUS.md updated (`6f795f0`).** Added tray app section, toast notifications section, updated runtime state and quick reference. Also exported as DISPATCHER-STATUS.docx via pandoc.
+- **Pushed to GitHub.** 22 commits pushed to origin/main.
+- **Overnight results (8 hours, $0.00 cost):** 89 wrapper-successes, 5 real dispatches (1 audit, 2 proposals, 1 self-audit, 1 roadmap-review), all Gemini 2.5 Pro. Zero errors. Canary test audit found every planted bug.
 - **All previous state unchanged.** `dry_run: false`, auto mode active, both engines validated, scorecard 36/36.
 
-## Part 11: what was done (2026-04-16)
+## Part 12: what was done (2026-04-16)
 
 | Commit | What | Files |
 |--------|------|-------|
-| `913464c` | Desktop notifications, task health dashboard, auto-open browser | `dashboard.mjs`, `run-dispatcher.ps1` |
-| `186f0da` | System tray app with health icon, context menu, auto-start | `tray.ps1`, `tray-icons.ps1`, `dashboard-launcher.cmd`, `assets/*.ico` |
+| `1e26a58` | Standalone BudgetDispatcher.exe (C# port of tray.ps1) | `scripts/tray-app.cs`, `scripts/build-tray.cmd`, `.gitignore` |
+| `6695d2d` | Regenerate icons as 32-bit PNG-in-ICO | `scripts/tray-icons.ps1`, `assets/tray-*.ico`, `scripts/tray-app.cs` |
+| `6f795f0` | Updated DISPATCHER-STATUS.md with tray/notifications/dashboard sections | `DISPATCHER-STATUS.md` |
 
-### Toast notification architecture
-
-```
-run-dispatcher.ps1
-  |-- $NotifyOutcome set at 8 outcome points (4 node, 4 claude)
-  |-- $NotifyEngine, $NotifyDuration set alongside
-  |-- Skip paths: $NotifyOutcome stays $null (no toast)
-  |-- finally block:
-        if ($NotifyOutcome) {
-          Show-DispatchToast  # reads last JSONL line for project/task
-        }
-        Gist sync...
-        Mutex release...
-```
-
-Toast uses `[Windows.UI.Notifications.ToastNotificationManager]` WinRT API with PowerShell's registered AppId. XML special chars escaped. Entire function wrapped in try/catch -- failure logged as warning, never blocks dispatch.
-
-### Scheduled task health
-
-Dashboard calls `execFileSync("powershell", ["Get-ScheduledTask BudgetDispatcher-Node"])` with 60s TTL cache. Returns `{ state, next_run, last_run, last_result }`. Fallback: `{ state: "NotFound" }` if task doesn't exist.
-
-### Key files modified this session
-
-| File | What changed | Key lines |
-|------|-------------|-----------|
-| `scripts/dashboard.mjs` | Scheduled task health (cached execFileSync), auto-open browser, --no-open flag | 65-95 (health), 30 (flag), 445-449 (open), 712-718 (HTML), 944-956 (render) |
-| `scripts/run-dispatcher.ps1` | Show-DispatchToast function, $Notify* variables at 8 outcome points, toast in finally block | 90-93 (vars), 114-171 (function), 675-678 (finally call), 8 outcome insertion points |
-| `scripts/tray.ps1` | System tray app: NotifyIcon, context menu, 30s polling, icon color swap | entire file (~210 lines) |
-| `scripts/tray-icons.ps1` | Icon generator: 3 colored-dot .ico files via System.Drawing | entire file (~49 lines) |
-| `scripts/dashboard-launcher.cmd` | Launcher: TCP probe, start dashboard if needed, open Chrome | entire file (~18 lines) |
-| `assets/tray-*.ico` | 16x16 colored circle icons (green/yellow/red) | generated by tray-icons.ps1 |
-
-### System tray architecture
+### Tray app architecture (updated)
 
 ```
-scripts/tray.ps1 (WinForms, runs at login via shell:startup)
-  |-- NotifyIcon with green/yellow/red .ico
+bin/BudgetDispatcher.exe (C# WinForms, compiled from scripts/tray-app.cs)
+  |-- NotifyIcon with green/yellow/red .ico (32-bit PNG-in-ICO)
   |-- ContextMenuStrip (Open Dashboard, Engine, Pause, Dispatch, Quit)
   |-- Timer (30s) -> GET /api/state -> update icon + tooltip + checkmarks
-  |-- "Open Dashboard" -> dashboard-launcher.cmd -> Chrome
+  |-- "Open Dashboard" -> scripts/dashboard-launcher.cmd -> Chrome
   |-- Single-instance mutex: Global\claude-budget-dispatcher-tray
+  |-- Startup shortcut: shell:startup\Budget Dispatcher Tray.lnk -> bin\BudgetDispatcher.exe
+  |-- Build: scripts\build-tray.cmd (csc.exe, no SDK needed)
 ```
 
-## Part 11: what's left
+`scripts/tray.ps1` kept as fallback/reference.
 
-### Priority 1: Polish the tray app into a standalone .exe
+## Part 12: what's left
 
-The tray app works but shows as "Windows PowerShell" in the system tray settings, which makes it impossible to pin without knowing that. It should be a proper named app.
+### Priority 1: Add real projects to the rotation
 
-**Problem:** PowerShell-hosted WinForms apps inherit PowerShell's identity. The tray icon appears as "Windows PowerShell" in Settings > Taskbar > Other system tray icons. Users can't drag it to the visible taskbar area on Windows 11 -- they have to find "Windows PowerShell" in settings and toggle it. This is not a smooth experience.
+The dispatcher currently rotates between two sandbox repos. It needs real projects to do real work overnight. Perry's GitHub repos at `github.com/pmartin1915` are the source.
 
-**Solution:** Compile a standalone `.exe` using `csc.exe` (C# compiler, ships with .NET Framework on every Windows machine). The .exe would:
-- Show as **"Budget Dispatcher"** in Task Manager and tray settings
-- Have its own icon (the green dot .ico already exists in `assets/`)
-- Be a proper Windows app -- no PowerShell window, no "Windows PowerShell" label
-- Same functionality: NotifyIcon, context menu, polling, icon color swap
+**Already cloned locally:**
+- `c:\Users\perry\DevProjects\combo` -- TypeScript utility library with Jest tests, has CLAUDE.md already
 
-**Implementation approach:**
-1. Create `scripts/tray-app.cs` -- a small C# WinForms app (~200 lines) that does exactly what `tray.ps1` does: NotifyIcon, ContextMenuStrip, Timer polling `/api/state`, icon color swap, menu actions via WebClient POST.
-2. Create `scripts/build-tray.cmd` -- one-line build script: `csc.exe /target:winexe /win32icon:assets\tray-green.ico /out:bin\BudgetDispatcher.exe scripts\tray-app.cs /r:System.Windows.Forms.dll /r:System.Drawing.dll`
-3. The resulting `bin/BudgetDispatcher.exe`:
-   - Shows as "BudgetDispatcher" (or "Budget Dispatcher" via AssemblyTitle attribute) in tray settings
-   - Has the green dot as its app icon
-   - `/target:winexe` means no console window at all
-   - Can be pinned to taskbar, added to startup, etc.
-4. Update the `shell:startup` shortcut to point to the .exe instead of `powershell -File tray.ps1`
-5. Keep `tray.ps1` as a fallback/reference but the .exe is the primary
+**Best candidates to add (most recently active, real codebases):**
 
-**Key details for the C# port:**
-- `HttpWebRequest`/`WebClient` for API calls (built into .NET Framework)
-- `System.Windows.Forms.NotifyIcon` with `ContextMenuStrip` (same as PS1)
-- `System.Windows.Forms.Timer` for 30s polling (same as PS1)
-- `Mutex` for single-instance guard (same pattern)
-- `Icon` loading from `.ico` files in `assets/` (relative to .exe path)
-- `Process.Start("chrome", url)` for opening dashboard
-- `Process.Start(launcherPath)` for "Open Dashboard" with auto-start
+| Repo | Language | Description | Why |
+|------|----------|-------------|-----|
+| `combo` | TypeScript | Utility library with Jest tests | Already cloned, has CLAUDE.md, tests exist -- easiest first target |
+| `boardbound` | TypeScript | (recently active) | Clone needed |
+| `shortless-ios` | Swift | Safari content blocker for iOS | Clone needed, Perry mentioned iOS apps specifically |
+| `shortless` | TypeScript | Content blocker (non-iOS) | Clone needed |
+| `medilex` | TypeScript | (medical domain) | Clone needed, may need clinical_gate: true |
+| `wilderness` | TypeScript | React survival game (Vite, Playwright) | Clone needed, has Playwright tests |
+| `burn-wizard` | TypeScript | (recently active) | Clone needed |
 
-**What stays the same:** The 3 `.ico` files, the `dashboard-launcher.cmd`, the dashboard API endpoints, the polling/status logic. The C# is a straight port of the PowerShell.
+**For each project, the next instance should:**
 
-**What to test:**
-- `scripts\build-tray.cmd` produces `bin\BudgetDispatcher.exe`
-- Double-click the .exe -- tray icon appears with "BudgetDispatcher" identity
-- Settings > Taskbar > Other system tray icons shows "BudgetDispatcher" (not "Windows PowerShell")
-- Toggle it on -- icon is always visible, green dot next to clock
-- Right-click menu works, "Open Dashboard" opens Chrome
-- Quit, then re-launch -- single instance guard works
-- Restart Windows -- startup shortcut launches the .exe automatically
+1. Clone to `c:\Users\perry\DevProjects\` if not already there
+2. Check if `CLAUDE.md` exists; if not, create one (project overview, key constraints, architecture)
+3. Check if `DISPATCH.md` exists; if not, create one with pre-approved tasks:
+   ```markdown
+   # Dispatch Configuration
+   ## Pre-Approved Tasks
+   | Task | Description |
+   |------|-------------|
+   | audit | Review codebase for bugs, security issues, code quality |
+   | explore | Map architecture, dependencies, and patterns |
+   | tests-gen | Generate missing test cases |
+   | docs-gen | Generate or improve documentation |
+   ```
+4. Add entry to `projects_in_rotation` in `config/budget.json`:
+   ```json
+   {
+     "slug": "combo",
+     "path": "c:\\Users\\perry\\DevProjects\\combo",
+     "clinical_gate": false,
+     "opportunistic_tasks": ["audit", "explore", "tests-gen", "docs-gen"]
+   }
+   ```
+5. Set `clinical_gate: true` for any medical/clinical repos (medilex, ecg-wizard-pwa)
+6. Start with `audit` as the first task -- get a baseline before doing generative work
+7. Verify: `node scripts/dispatch.mjs --force --dry-run` should show the new project in selector output
+
+**Start with combo** (already cloned, has CLAUDE.md) -- it's the quickest win. Then add 2-3 more. Don't add all at once; verify each one dispatches successfully before adding the next.
 
 ### Other next steps
 
-1. **Add Perry's iOS apps to project rotation.** Repos are on laptop, available at github.com/pmartin1915. Clone them to DevProjects, create `DISPATCH.md` and `CLAUDE.md`, add to `projects_in_rotation` in `config/budget.json`. Start with `audit` as first task.
+1. **WebSocket for live dashboard updates.** Replace 30s polling with file-watcher + push. Node's `node:fs.watch` on status/ + `node:http` upgrade to WebSocket (no dependency needed).
 
-2. **WebSocket for live dashboard updates.** Replace 30s polling with file-watcher + push. Node's `node:fs.watch` on status/ + `node:http` upgrade to WebSocket (no dependency needed). More responsive monitoring.
+2. **Budget trend sparkline.** Parse last 7 days of JSONL and render headroom-over-time in Budget tab.
 
-3. **Budget trend sparkline.** Parse last 7 days of JSONL and render headroom-over-time in Budget tab.
+3. **Expand free model roster.** Add new free models to `fallback_chain` in budget.json as they become available.
 
-4. **Expand free model roster.** Add new free models to `fallback_chain` in budget.json as they become available.
-
-## Part 10: TL;DR (historical)
-
-- **Claude engine VALIDATED (2026-04-16).** Full pipeline confirmed end-to-end: estimator, gate bypasses, `claude -p` via `.cmd` shim, ExitCode capture, stdin/stdout piping, JSONL logging. Claude correctly fail-closed on negative headroom. Three bugs found and fixed during validation.
-- **Dashboard redesigned (`9da4f2c`, `174b072`).** 6-tab layout: Status (health beacon, prediction, budget bars), Budget (trajectory, sparkline), Projects (roster management, task toggles), Logs (paginated, drill-down), Config (all settings), About (project charters and roadmaps). 8 API endpoints. Zero new dependencies.
-- **CLI enhanced (`9da4f2c`).** 10 menu options: engine switch, pause, dry-run toggle, real dispatch, prediction, log tail, open browser.
-- **libuv crash fixed (`ff8b9ab`).** `dispatch.mjs` was crashing on exit when Gemini/Mistral HTTP handles were still closing. `setImmediate` replaced with `setTimeout(..., 200)`. Tested 4x, all clean exits.
-- **PowerShell process launch fixed (`ed25364`, `6873aa8`).** Two PS 5.1 bugs: `Get-Command claude` resolved to `.ps1` shim (incompatible with `Start-Process`), and `Start-Process -PassThru` returned null `ExitCode` with redirected IO. Fixed by resolving `.cmd` and using `[System.Diagnostics.Process]::Start`.
-- **`-ForceBudget` now bypasses activity gate (`537b30f`).** Matches Node engine's `--force` behavior. Manual testing no longer blocked by idle check.
-- **Scorecard: 36/36 done** (excluding S-1/S-2 which are infrastructure-gated on WSL2).
-- **Both engines validated.** Node engine has 1 successful real dispatch (roadmap-review). Claude engine validated via `-ForceBudget`.
-- **`dry_run: false`** -- live, do NOT flip back to true.
-- **Budget state:** headroom -24% (trailing30-reserve-floor-threatened). Auto mode selects node on every firing.
-
-## Part 10: what was done (2026-04-16)
-
-| Commit | What | Files |
-|--------|------|-------|
-| `537b30f` | `-ForceBudget` bypasses activity gate | `run-dispatcher.ps1`, `HANDOFF.md`, `DISPATCHER-STATUS.md`, `HANDOFF-PROMPT.md` |
-| `ed25364` | Resolve `claude.cmd` instead of `.ps1` for Start-Process | `run-dispatcher.ps1` |
-| `6873aa8` | .NET Process for reliable ExitCode on claude -p | `run-dispatcher.ps1` |
-| `dfb45fb` | Mark Claude engine validated | `HANDOFF.md` |
-| `ff8b9ab` | Fix libuv crash on dispatch.mjs exit | `dispatch.mjs` |
-| `9da4f2c` | Redesigned dashboard (5 tabs) + enhanced CLI | `dashboard.mjs`, `control.mjs` |
-| `861af9b` | Fix client-side `esc()` missing | `dashboard.mjs` |
-| `174b072` | About tab with project docs | `dashboard.mjs` |
-
-### Architecture: dashboard flow
-
-```
-node scripts/dashboard.mjs (localhost:7380)
-  |
-  +-- GET /              -> 6-tab HTML page (Status, Budget, Projects, Logs, Config, About)
-  +-- GET /api/state     -> engine, budget, last run, recent logs, today's run count
-  +-- GET /api/predict   -> local heuristic: next project/task/model (no API tokens)
-  +-- GET /api/budget-detail -> full snapshot + 7-day histogram
-  +-- GET /api/projects  -> roster with per-project history
-  +-- GET /api/project-docs -> CLAUDE.md, DISPATCH.md, STATE.md, ROADMAP.md for each project
-  +-- GET /api/logs      -> paginated JSONL (offset, limit, outcome/project filter)
-  +-- GET /api/run-log   -> individual dispatcher-runs/*.log content (path-validated)
-  +-- POST /api/engine   -> set engine_override
-  +-- POST /api/pause    -> toggle pause
-  +-- POST /api/dry-run  -> toggle dry_run
-  +-- POST /api/dispatch -> trigger dispatch (--force, optional --dry-run)
-  +-- POST /api/projects/reorder -> move project up/down in rotation
-  +-- POST /api/projects/tasks   -> update project's opportunistic_tasks
-```
-
-### Manual testing
-
-```
-node scripts/dashboard.mjs                     # web UI at localhost:7380
-node scripts/control.mjs                        # CLI menu (10 options)
-node scripts/dispatch.mjs --force --dry-run     # inspect pipeline
-node scripts/dispatch.mjs --force               # real dispatch now
-cat status/budget-dispatch-last-run.json        # check results
-```
-
-### Key files modified this session
-
-| File | What changed | Key lines |
-|------|-------------|-----------|
-| `scripts/run-dispatcher.ps1` | Activity gate bypass, .cmd resolution, .NET Process for claude -p | 375-385, 418-453, 457-570 |
-| `scripts/dashboard.mjs` | Complete rewrite: 6 tabs, 8 new API endpoints, health beacon, prediction, budget bars, log drill-down, project docs | entire file (~1250 lines) |
-| `scripts/control.mjs` | Enhanced: 10 menu options, prediction, log tail, weekly data, color output | entire file (~200 lines) |
-| `scripts/dispatch.mjs` | libuv drain fix (setImmediate -> setTimeout) | line 257 |
-
-## Part 10: what's left
-
-### High-value next steps
-
-1. **Add iOS apps to project rotation.** Create `CLAUDE.md` and `DISPATCH.md` in each iOS app repo defining pre-approved tasks (audit, explore, tests-gen, docs-gen). Add entries to `projects_in_rotation` in `config/budget.json`. The dispatcher and dashboard will pick them up automatically. Start with `audit` as the first task to get a baseline.
-
-2. **Desktop notifications on dispatch.** Use PowerShell toast notifications (`New-BurntToastNotification` or `[Windows.UI.Notifications]`) to alert when a dispatch completes. Especially useful overnight -- check your notification center in the morning.
-
-3. **Scheduled task health check in dashboard.** Add a Status tab indicator showing whether `BudgetDispatcher-Node` is registered and its next run time. Use `powershell -Command "(Get-ScheduledTaskInfo 'BudgetDispatcher-Node').NextRunTime"` from the dashboard server.
-
-4. **Auto-open browser on dashboard start.** Add `import { exec } from 'node:child_process'; exec('start http://localhost:7380')` after `server.listen`. Small QoL win.
-
-5. **WebSocket for live updates.** Replace 30s polling with file-watcher + push. Shows dispatch results the instant they happen. Node's `node:fs.watch` + `node:http` upgrade to WebSocket (no dependency needed). More responsive monitoring.
-
-6. **System tray icon.** A tiny Node.js system tray app showing green/yellow/red dot for dispatcher status. Right-click menu for engine switching, pause, open dashboard. Would make the dispatcher visible without opening a browser. Moderate effort, needs `systray2` or similar.
-
-7. **Budget trend sparkline.** Parse the last 7 days of JSONL and render headroom-over-time in the Budget tab. Would show whether headroom is trending toward positive (Claude activation imminent). The 7-day activity sparkline is already there; this would add a headroom line.
-
-8. **Expand free model roster.** When Gemini 2.5 Flash or other free models become available, add them to `fallback_chain` in budget.json. The allowlist mode already supports this.
-
-### Infrastructure-gated (needs WSL2 or Windows Sandbox)
-- **S-1** Execution sandbox for generated code
-- **S-2** Network isolation for test subprocesses
-
-### Optional
-- **I-4 native SDK reconciliation** -- swap `withTimeout` to native `AbortSignal.timeout`. Low priority.
-
-## Part 11: things NOT to do
+## Part 12: things NOT to do
 
 - Do not flip `dry_run` back to `true`.
 - Do not re-enable the `ClaudeBudgetDispatcher` scheduled task (auto mode replaces it).
@@ -220,8 +104,9 @@ cat status/budget-dispatch-last-run.json        # check results
 - PS1 files must stay pure ASCII (R-6 pre-commit hook enforces this).
 - Before any commit: run `mcp__pal__codereview` with model `gemini-2.5-pro`. Fallback to `review_validation_type: "internal"` if Gemini is 503-ing.
 - Do not add `-ForceBudget` to the scheduled task arguments.
+- Do not kill or restart `BudgetDispatcher.exe` unless rebuilding -- it auto-starts on login.
 
-## Part 11: gotchas (appended to prior sessions)
+## Part 12: gotchas (appended to prior sessions)
 
 8. **Budget estimate staleness is now solved.** Every firing (even node engine) refreshes `usage-estimate.json`.
 9. **libuv UV_HANDLE_CLOSING assertion -- FIXED (`ff8b9ab`).** Was crashing dispatch.mjs on exit when API clients had open HTTP handles. Fixed by replacing `setImmediate` with `setTimeout(..., 200)` for handle drain. Tested 4x clean.
@@ -232,12 +117,14 @@ cat status/budget-dispatch-last-run.json        # check results
 14. **PowerShell 5.1 ExitCode null bug.** `Start-Process -PassThru` with `-RedirectStandardOutput` returns null ExitCode. Both engines now use `[System.Diagnostics.Process]::Start` with async stream capture instead.
 15. **Toast notification on skip-as-success.** When dispatch.mjs skips (user-active) it exits 0, so the PS1 wrapper sees "success" and fires a toast. The toast says "Dispatch: success" but no project/task since the JSONL's wrapper-success entry has none. This is by design -- the important toasts are real dispatches with work product, which DO have project/task info.
 16. **Dashboard execFileSync and scheduled task.** `getScheduledTaskInfo()` uses `execFileSync("powershell", ...)` which bypasses cmd.exe entirely -- no quote-escaping issues. If you test from bash with `node -e "..."`, the `$` in PowerShell vars gets eaten by bash. The actual dashboard.mjs file uses JS strings (not template literals) so `$` passes through correctly.
+17. **Icon 4-bit color loss -- FIXED (`6695d2d`).** `Bitmap.GetHicon()` + `Icon.Save()` drops to 4-bit, losing antialiasing and transparency. Fixed by writing PNG data directly into the ICO container (PNG-in-ICO, Vista+). Icons are now 32-bit ARGB.
+18. **pandoc installed via winget.** Located at `c:/Users/perry/AppData/Local/Pandoc/pandoc.exe`. Not in bash PATH but works via full path or cmd.exe.
 
 ---
 
-# Historical context (Parts 5-10)
+# Historical context (Parts 5-11)
 
-Parts 5 through 10 shipped the bulk of the audit findings (36 items), took both engines from dry-run to live, resolved the OneDrive junction / selector hot-fix / named mutex / error visibility / libuv crash, added auto mode with budget-adaptive routing, shipped the dashboard with CLI control, validated both engines, and added desktop notifications. See git log for full history. The key progression:
+Parts 5 through 11 shipped the bulk of the audit findings (36 items), took both engines from dry-run to live, resolved the OneDrive junction / selector hot-fix / named mutex / error visibility / libuv crash, added auto mode with budget-adaptive routing, shipped the dashboard with CLI control, validated both engines, added desktop notifications, system tray app, and compiled the tray app into a standalone .exe. See git log for full history. The key progression:
 
 - **Part 5:** ajv blackout fix, selector hot-fix verified, R-3 named mutex
 - **Part 6:** S-7 scanner, I-4 timeouts, R-5 log rotation, C-4 git fsck, R-7 index.lock cleanup, R-4 gist sync
@@ -245,4 +132,5 @@ Parts 5 through 10 shipped the bulk of the audit findings (36 items), took both 
 - **Part 8:** Auto mode, worktree cleanup, --force flag
 - **Part 9:** Engine switching dashboard, CLI control, config override, -ForceBudget
 - **Part 10:** Claude engine validation, dashboard redesign (6 tabs), CLI upgrade, libuv drain fix, PS 5.1 process launch fixes
-- **Part 11:** Desktop toast notifications, scheduled task health in dashboard, auto-open browser
+- **Part 11:** Desktop toast notifications, scheduled task health in dashboard, auto-open browser, system tray app (PowerShell)
+- **Part 12:** Standalone BudgetDispatcher.exe (C# port), icon fix (32-bit PNG-in-ICO), DISPATCHER-STATUS.md update, pandoc install

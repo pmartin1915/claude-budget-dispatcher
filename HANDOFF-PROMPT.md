@@ -7,42 +7,54 @@ Resume work on claude-budget-dispatcher.
 
 Required reading:
 1. DISPATCHER-STATUS.md (dual-engine guide, scorecard, current state)
-2. git log --oneline main -20
-3. HANDOFF.md (Part 11 context + gotchas list at bottom)
+2. git log --oneline main -25
+3. HANDOFF.md (Part 12 context + gotchas list at bottom)
 
-Current state: Both engines validated and live. Auto mode active via scheduled
-task. System tray app exists (tray.ps1) but shows as "Windows PowerShell" in
-the tray settings -- needs to be compiled into a standalone .exe so it has its
-own identity ("Budget Dispatcher") and icon.
+Current state: Everything is live and working. Tray app (.exe) running,
+auto mode active, both engines validated, 89 successful overnight runs.
+The system works -- it just needs real projects to work ON.
 
-Priority for this session: Compile the tray app into a standalone .exe.
+Priority for this session: Add real projects to the dispatcher rotation.
 
-The HANDOFF.md "what's left" section has a detailed plan:
-- Port tray.ps1 to a C# WinForms app (scripts/tray-app.cs, ~200 lines)
-- Build with csc.exe (ships with .NET Framework, no SDK install needed)
-- /target:winexe /win32icon:assets/tray-green.ico /out:bin/BudgetDispatcher.exe
-- Shows as "BudgetDispatcher" in Task Manager and tray settings
-- Update shell:startup shortcut to point to the .exe
-- The .ico files, dashboard-launcher.cmd, and dashboard API are all ready
+The dispatcher currently bounces between two sandbox repos. Perry wants
+his actual codebases improved overnight. The HANDOFF.md "what's left"
+section has the full plan, but here's the short version:
 
-The existing tray.ps1 is the reference implementation -- same logic, just
-rewritten in C#. Key parts: NotifyIcon, ContextMenuStrip, Timer (30s),
-WebClient for GET/POST to localhost:7380, Mutex for single-instance,
-Icon loading from assets/*.ico, Process.Start for Chrome.
+1. Start with combo (already cloned at c:\Users\perry\DevProjects\combo,
+   has CLAUDE.md). Check if it has DISPATCH.md; if not, create one with
+   pre-approved tasks (audit, explore, tests-gen, docs-gen). Add it to
+   projects_in_rotation in config/budget.json. Verify with:
+   node scripts/dispatch.mjs --force --dry-run
 
-After the .exe works:
-- Add Perry's iOS apps to project rotation (github.com/pmartin1915)
+2. Clone 2-3 more repos from github.com/pmartin1915:
+   - boardbound (TypeScript, recently active)
+   - shortless-ios (Swift, iOS content blocker -- Perry specifically wants iOS apps)
+   - wilderness (React + TypeScript game, has Playwright tests)
+   Create CLAUDE.md and DISPATCH.md for each. Add to rotation.
+
+3. For any medical/clinical repos (medilex, ecg-wizard-pwa), set
+   clinical_gate: true in the budget.json entry.
+
+4. Verify each project dispatches before adding the next:
+   node scripts/dispatch.mjs --force --dry-run
+
+The config format for projects_in_rotation is in config/budget.example.json.
+Each entry needs: slug, path (absolute), clinical_gate (bool),
+opportunistic_tasks (array of task strings).
+
+After projects are added:
 - WebSocket for live dashboard updates
 - Budget trend sparkline
 
 Tools available:
-- System tray icon (currently PowerShell-based, to be replaced)
-- node scripts/dashboard.mjs   # web UI at localhost:7380
-- node scripts/control.mjs     # interactive CLI
-- scripts/dashboard-launcher.cmd  # start dashboard + open Chrome
+- Tray app: bin\BudgetDispatcher.exe (running, green dot in tray)
+- Dashboard: node scripts/dashboard.mjs (localhost:7380)
+- CLI: node scripts/control.mjs
+- Launcher: scripts/dashboard-launcher.cmd
 
 Before any commit: run mcp__pal__codereview with model: "gemini-2.5-pro".
 Fallback to review_validation_type: "internal" if Gemini is 503-ing.
 Do NOT flip dry_run back to true. Do NOT re-enable ClaudeBudgetDispatcher.
 Do NOT use gemini-3-pro-preview. Do NOT add -ForceBudget to scheduled task.
+Do NOT kill BudgetDispatcher.exe unless rebuilding.
 ```
