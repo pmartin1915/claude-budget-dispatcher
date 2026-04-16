@@ -453,13 +453,13 @@ if ($Engine -eq 'node') {
   }
 
   # ---- Phase 3: claude -p invocation with retry ----
+  # Uses [System.Diagnostics.Process]::Start instead of Start-Process.
+  # On PowerShell 5.1, Start-Process -PassThru with -RedirectStandardOutput
+  # returns a Process object whose ExitCode stays $null after WaitForExit.
+  # Direct .NET Process reports ExitCode reliably (same fix as Node engine).
   Write-Log "phase 3: invoking claude -p"
 
-  $stdinTemp = Join-Path $LogDir "$timestamp-$RunId.stdin.tmp"
-  $stdoutTemp = Join-Path $LogDir "$timestamp-$RunId.stdout.tmp"
-  $stderrTemp = Join-Path $LogDir "$timestamp-$RunId.stderr.tmp"
-
-  Copy-Item -Path $PromptFile -Destination $stdinTemp -Force
+  $promptContent = Get-Content $PromptFile -Raw
 
   $attempt = 0
   $success = $false
@@ -469,22 +469,30 @@ if ($Engine -eq 'node') {
     $attempt++
     Write-Log "attempt $attempt of $($MaxRetries + 1)"
 
-    $procError = $null
-    $procExited = $false
     $proc = $null
+    $stdoutTask = $null
+    $stderrTask = $null
 
     try {
-      $proc = Start-Process -FilePath $ClaudePath `
-        -ArgumentList '-p' `
-        -RedirectStandardInput $stdinTemp `
-        -RedirectStandardOutput $stdoutTemp `
-        -RedirectStandardError $stderrTemp `
-        -NoNewWindow `
-        -PassThru `
-        -WorkingDirectory $RepoRoot
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      # .cmd files need cmd.exe as the host process
+      $psi.FileName = "cmd.exe"
+      $psi.Arguments = "/c `"$ClaudePath`" -p"
+      $psi.UseShellExecute = $false
+      $psi.RedirectStandardInput = $true
+      $psi.RedirectStandardOutput = $true
+      $psi.RedirectStandardError = $true
+      $psi.CreateNoWindow = $true
+      $psi.WorkingDirectory = $RepoRoot
+      $proc = [System.Diagnostics.Process]::Start($psi)
+      # Feed prompt via stdin then close to signal EOF
+      $proc.StandardInput.Write($promptContent)
+      $proc.StandardInput.Close()
+      # Async reads prevent buffer-fill deadlock
+      $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+      $stderrTask = $proc.StandardError.ReadToEndAsync()
     } catch {
-      $procError = $_
-      Write-Log "failed to start claude: $procError" 'error'
+      Write-Log "failed to start claude: $_" 'error'
     }
 
     if ($null -ne $proc) {
@@ -506,23 +514,22 @@ if ($Engine -eq 'node') {
           wrapper_duration_sec = Get-DurationSec
         }
 
-        Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
         exit 3
       }
 
       $finalClaudeExit = $proc.ExitCode
       Write-Log "claude exit=$finalClaudeExit"
 
+      # Drain async output now that the process has exited
+      $stdoutContent = ''
+      $stderrContent = ''
+      if ($null -ne $stdoutTask) { try { $stdoutContent = $stdoutTask.Result } catch { $stdoutContent = '' } }
+      if ($null -ne $stderrTask) { try { $stderrContent = $stderrTask.Result } catch { $stderrContent = '' } }
+
       Add-Content -Path $LogFile -Value "---STDOUT---"
-      if (Test-Path $stdoutTemp) {
-        $stdoutContent = Get-Content $stdoutTemp -Raw -ErrorAction SilentlyContinue
-        if ($stdoutContent) { Add-Content -Path $LogFile -Value $stdoutContent }
-      }
+      if ($stdoutContent) { Add-Content -Path $LogFile -Value $stdoutContent }
       Add-Content -Path $LogFile -Value "---STDERR---"
-      if (Test-Path $stderrTemp) {
-        $stderrContent = Get-Content $stderrTemp -Raw -ErrorAction SilentlyContinue
-        if ($stderrContent) { Add-Content -Path $LogFile -Value $stderrContent }
-      }
+      if ($stderrContent) { Add-Content -Path $LogFile -Value $stderrContent }
 
       if ($finalClaudeExit -eq 0) {
         $success = $true
@@ -540,7 +547,6 @@ if ($Engine -eq 'node') {
           wrapper_duration_sec = Get-DurationSec
         }
 
-        Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
         exit 2
       } else {
         Write-Log "claude -p returned exit=$finalClaudeExit (retryable)" 'warn'
@@ -557,8 +563,6 @@ if ($Engine -eq 'node') {
       }
     }
   }
-
-  Remove-Item $stdinTemp, $stdoutTemp, $stderrTemp -Force -ErrorAction SilentlyContinue
 
   if (-not $success) {
     Write-Log "all retries exhausted, fail closed" 'error'
