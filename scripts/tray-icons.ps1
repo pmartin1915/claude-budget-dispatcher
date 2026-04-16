@@ -1,6 +1,7 @@
 # Generates tray icon .ico files for the Budget Dispatcher system tray app.
 # Run once: powershell -File scripts/tray-icons.ps1
 # Produces: assets/tray-green.ico, assets/tray-yellow.ico, assets/tray-red.ico
+# Uses PNG-in-ICO format for 32-bit ARGB with proper transparency.
 
 Add-Type -AssemblyName System.Drawing
 
@@ -18,7 +19,7 @@ $colors = @{
 }
 
 foreach ($name in $colors.Keys) {
-    $bmp = New-Object System.Drawing.Bitmap(16, 16)
+    $bmp = New-Object System.Drawing.Bitmap(16, 16, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.Clear([System.Drawing.Color]::Transparent)
@@ -34,16 +35,40 @@ foreach ($name in $colors.Keys) {
     $brush.Dispose()
     $pen.Dispose()
 
-    $iconPath = Join-Path $assetsDir "tray-$name.ico"
-    $hIcon = $bmp.GetHicon()
-    $icon = [System.Drawing.Icon]::FromHandle($hIcon)
-    $fs = [System.IO.File]::Create($iconPath)
-    $icon.Save($fs)
-    $fs.Close()
-    $icon.Dispose()
+    # Save bitmap as PNG into memory
+    $pngStream = New-Object System.IO.MemoryStream
+    $bmp.Save($pngStream, [System.Drawing.Imaging.ImageFormat]::Png)
+    $pngBytes = $pngStream.ToArray()
+    $pngStream.Dispose()
     $bmp.Dispose()
 
-    Write-Host "Created $iconPath"
+    # Write ICO file with embedded PNG (supported Vista+)
+    $iconPath = Join-Path $assetsDir "tray-$name.ico"
+    $fs = [System.IO.File]::Create($iconPath)
+    $bw = New-Object System.IO.BinaryWriter($fs)
+
+    # ICONDIR header
+    $bw.Write([uint16]0)      # reserved
+    $bw.Write([uint16]1)      # type = ICO
+    $bw.Write([uint16]1)      # count = 1 image
+
+    # ICONDIRENTRY
+    $bw.Write([byte]16)       # width
+    $bw.Write([byte]16)       # height
+    $bw.Write([byte]0)        # colors (0 = 256+)
+    $bw.Write([byte]0)        # reserved
+    $bw.Write([uint16]1)      # color planes
+    $bw.Write([uint16]32)     # bits per pixel
+    $bw.Write([uint32]$pngBytes.Length)  # size of PNG data
+    $bw.Write([uint32]22)     # offset to PNG data (6 + 16 = 22)
+
+    # PNG data
+    $bw.Write($pngBytes)
+
+    $bw.Dispose()
+    $fs.Dispose()
+
+    Write-Host "Created $iconPath ($($pngBytes.Length + 22) bytes, 32-bit PNG-in-ICO)"
 }
 
 Write-Host 'Done. 3 icons generated in assets/'
