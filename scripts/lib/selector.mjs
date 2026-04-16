@@ -109,6 +109,7 @@ export async function selectProjectAndTask(config, clients) {
     return null;
   }
 
+  // S-6: post-call allowlist validation -- project slug + task allowlist.
   const projectConfig = projects.find((p) => p.slug === selection.project);
   if (!projectConfig) {
     console.error(`[selector] unknown project slug: ${selection.project}`);
