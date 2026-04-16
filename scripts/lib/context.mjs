@@ -6,6 +6,12 @@ import { resolve } from "node:path";
 const MAX_STATE_CHARS = 2000;
 const MAX_DISPATCH_CHARS = 3000;
 
+// Tasks that require src/ files — gatherFilesForDocs and gatherFilesForCodegen
+// both call gatherSrcFiles which returns [] when src/ is missing.
+const NEEDS_SRC = new Set([
+  "docs-gen", "tests-gen", "session-log", "jsdoc", "add-tests", "refactor", "clean",
+]);
+
 /**
  * Read a file with optional character truncation.
  * @param {string} filePath - Absolute path
@@ -54,10 +60,20 @@ export function buildProjectContext(project, logPath) {
   const lastDispatch = getLastDispatchTime(project.slug, logPath);
   const recentOutcomes = getRecentOutcomes(project.slug, logPath);
 
+  // Check if src/ exists — tasks like docs-gen, tests-gen, refactor, session-log
+  // require source files and will always skip without them. Hard-filter them out
+  // so the selector can't pick tasks that would inevitably fail.
+  const srcDir = resolve(project.path, "src");
+  const hasSrcFiles = existsSync(srcDir);
+  const viableTasks = hasSrcFiles
+    ? project.opportunistic_tasks
+    : project.opportunistic_tasks.filter((t) => !NEEDS_SRC.has(t));
+
   return {
     slug: project.slug,
     clinical_gate: project.clinical_gate || false,
-    opportunistic_tasks: project.opportunistic_tasks,
+    opportunistic_tasks: viableTasks,
+    has_source_files: hasSrcFiles,
     state_summary: stateContent ?? "(no state file)",
     approved_tasks: extractPreApprovedSection(dispatchContent),
     last_dispatched: lastDispatch ?? "never",

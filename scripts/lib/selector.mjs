@@ -141,6 +141,7 @@ function buildSelectorPrompt(contexts) {
     .map(
       (ctx) => `### ${ctx.slug}
 - Clinical gate: ${ctx.clinical_gate}
+- Has source files (src/): ${ctx.has_source_files}
 - Allowed tasks: ${ctx.opportunistic_tasks.join(", ")}
 - Last dispatched: ${ctx.last_dispatched}
 
@@ -169,8 +170,9 @@ Given these projects and their current state, pick ONE project and ONE task.
 3. Least-recently-dispatched -> tiebreaker
 4. ONLY pick from the intersection of the project's Pre-Approved Tasks and its "Allowed tasks" list
 5. Tasks that would touch domain/ on clinical_gate=true projects are FORBIDDEN
-6. Avoid tasks that failed or were reverted in the last 2 consecutive attempts — pick a different task or project instead
-7. If all projects were recently dispatched and have no urgent issues, pick the one with the most impactful available task
+6. If has_source_files is false: DO NOT pick docs-gen, tests-gen, session-log, jsdoc, refactor, add-tests, or clean — these tasks need src/ files and will always skip without them. Pick explore, research, audit, self-audit, or roadmap-review instead (these use git history).
+7. Avoid tasks that failed or were reverted in the last 2 consecutive attempts — pick a different task or project instead
+8. If all projects were recently dispatched and have no urgent issues, pick the one with the most impactful available task
 
 ## Projects
 
