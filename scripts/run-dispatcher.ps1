@@ -516,31 +516,30 @@ if ($Engine -eq 'node') {
 
 } # end Engine if/else
 
-# ---- Gist status sync ----
-# Push last-run status to a public GitHub Gist for cross-machine visibility.
-# Replaces the OneDrive junction (R-4) which never synced through NTFS junctions.
-$configFile = Join-Path $RepoRoot 'config\budget.json'
-$gistId = $null
-try {
-  $gistId = (Get-Content $configFile -Raw | ConvertFrom-Json).status_gist_id
-} catch {
-  Write-Log "failed to read status_gist_id from config: $_" 'warn'
-}
-if ($gistId) {
-  $statusFile = Join-Path $RepoRoot 'status\budget-dispatch-last-run.json'
-  if (Test-Path $statusFile) {
-    try {
-      & gh gist edit $gistId $statusFile *>$null
-      if ($LASTEXITCODE -ne 0) {
-        Write-Log "gist sync failed (gh exit=$LASTEXITCODE)" 'warn'
+} finally {
+  # ---- Gist status sync (runs on ALL exit paths, including errors) ----
+  # Push last-run status to a public GitHub Gist for cross-machine visibility.
+  # Moved to finally block so errors don't leave the gist stale.
+  $configFile = Join-Path $RepoRoot 'config\budget.json'
+  $gistId = $null
+  try {
+    $gistId = (Get-Content $configFile -Raw | ConvertFrom-Json).status_gist_id
+  } catch {
+    Write-Log "failed to read status_gist_id from config: $_" 'warn'
+  }
+  if ($gistId) {
+    $statusFile = Join-Path $RepoRoot 'status\budget-dispatch-last-run.json'
+    if (Test-Path $statusFile) {
+      try {
+        & gh gist edit $gistId $statusFile *>$null
+        if ($LASTEXITCODE -ne 0) {
+          Write-Log "gist sync failed (gh exit=$LASTEXITCODE)" 'warn'
+        }
+      } catch {
+        Write-Log "gist sync error: $_" 'warn'
       }
-    } catch {
-      Write-Log "gist sync error: $_" 'warn'
     }
   }
-}
-
-} finally {
   # Release named mutex (R-3). Kernel auto-releases on process death but
   # an explicit release lets a rapid-succession re-run avoid the abandoned-
   # mutex warning path. ReleaseMutex must run on the owning thread;

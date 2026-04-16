@@ -35,6 +35,7 @@ import { sweepStaleIndexLocks, weeklyGitFsck, weeklyNpmAudit } from "./lib/git-l
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const CONFIG_PATH = resolve(REPO_ROOT, "config", "budget.json");
+let globalStartMs = Date.now();
 
 class DieError extends Error {
   constructor(msg) { super(msg); this.name = "DieError"; }
@@ -70,6 +71,7 @@ function initClients() {
 
 async function main() {
   const startMs = Date.now();
+  globalStartMs = startMs;
   const config = loadConfig();
   const dryRun = config.dry_run === true || process.argv.includes("--dry-run");
 
@@ -225,7 +227,13 @@ async function main() {
 
 main()
   .catch((e) => {
-    if (e instanceof DieError) return; // already logged by die(), exitCode already set
+    if (e instanceof DieError) {
+      // die() already logged FATAL to stderr and set exitCode=2.
+      // Still write JSONL + last-run so the gist sync reflects the error.
+      appendLog({ outcome: "error", reason: e.message, phase: "fatal", engine: "dispatch.mjs" });
+      writeLastRun({ outcome: "error", reason: e.message }, 0);
+      return;
+    }
     console.error(`[dispatch] unhandled error: ${e.stack || e.message}`);
     appendLog({
       outcome: "error",
@@ -233,6 +241,7 @@ main()
       phase: "unhandled",
       engine: "dispatch.mjs",
     });
+    writeLastRun({ outcome: "error", reason: e.message }, Date.now() - globalStartMs);
     process.exitCode = 1;
   })
   .finally(() => {
