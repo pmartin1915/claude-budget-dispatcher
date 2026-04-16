@@ -96,7 +96,7 @@ $taskName = "BudgetDispatcher-Node"
 $runScript = Join-Path $RepoRoot 'scripts\run-dispatcher.ps1'
 $action = New-ScheduledTaskAction `
   -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runScript`" -RepoRoot `"$RepoRoot`" -Engine node"
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runScript`" -RepoRoot `"$RepoRoot`" -Engine auto"
 
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
   -RepetitionInterval (New-TimeSpan -Minutes 20) `
@@ -115,9 +115,18 @@ if ($existing) {
   Set-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings | Out-Null
 } else {
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
-    -Description "Runs dispatch.mjs (Node engine) every 20 min using free-tier Gemini/Mistral APIs" | Out-Null
+    -Description "Runs dispatcher every 20 min in auto mode: Claude when budget allows, free models otherwise" | Out-Null
 }
-Write-Host "  Task '$taskName' registered (every 20 min)" -ForegroundColor Green
+Write-Host "  Task '$taskName' registered (every 20 min, auto engine)" -ForegroundColor Green
+
+# Migration: disable old separate Claude engine task if it exists.
+# Auto mode handles both engines via budget-adaptive routing, so the
+# standalone ClaudeBudgetDispatcher task is no longer needed.
+$oldClaudeTask = Get-ScheduledTask -TaskName "ClaudeBudgetDispatcher" -ErrorAction SilentlyContinue
+if ($oldClaudeTask -and $oldClaudeTask.State -ne 'Disabled') {
+  Disable-ScheduledTask -TaskName "ClaudeBudgetDispatcher" | Out-Null
+  Write-Host "  Disabled old ClaudeBudgetDispatcher task (replaced by auto mode)" -ForegroundColor Yellow
+}
 
 # ---- Step 5: Dry test ----
 Write-Host "[5/5] Running dry test..." -ForegroundColor Yellow
@@ -137,8 +146,8 @@ try {
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "The dispatcher will run every 20 minutes." -ForegroundColor White
-Write-Host "It uses free-tier APIs only (no Claude Max cost)." -ForegroundColor White
+Write-Host "The dispatcher will run every 20 minutes in auto mode." -ForegroundColor White
+Write-Host "Uses Claude when budget allows, free-tier APIs otherwise." -ForegroundColor White
 Write-Host ""
 Write-Host "To check status:  Get-ScheduledTask -TaskName '$taskName'" -ForegroundColor Gray
 Write-Host "To pause:         touch $RepoRoot\config\PAUSED" -ForegroundColor Gray

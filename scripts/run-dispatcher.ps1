@@ -59,7 +59,7 @@ param(
 
   [string]$ClaudePath = '',
 
-  [ValidateSet('claude', 'node')]
+  [ValidateSet('claude', 'node', 'auto')]
   [string]$Engine = 'claude'
 )
 
@@ -146,6 +146,40 @@ Get-ChildItem $LogDir -Filter "*.log" -ErrorAction SilentlyContinue |
   Remove-Item -Force -ErrorAction SilentlyContinue
 
 try {
+
+# ---- Engine auto-selection ----
+# When -Engine auto, refresh the budget estimate (zero LLM cost, just local
+# file scanning) and read the snapshot to decide: if Claude budget has
+# headroom, use Claude for plan/design/architecture tasks. Otherwise, use
+# the free-model engine. Fail-safe: defaults to node on any error.
+if ($Engine -eq 'auto') {
+  $estimatorScript = Join-Path $RepoRoot 'scripts\estimate-usage.mjs'
+  $estimatorOutput = & node $estimatorScript 2>&1
+  $estimatorExit = $LASTEXITCODE
+  Write-Log "auto: estimator refresh exit=$estimatorExit"
+
+  $resolvedEngine = 'node'
+
+  if ($estimatorExit -eq 0) {
+    $snapshotPath = Join-Path $RepoRoot 'status\usage-estimate.json'
+    if (Test-Path $snapshotPath) {
+      $snap = Get-Content $snapshotPath -Raw | ConvertFrom-Json
+      if ($snap.dispatch_authorized -eq $true) {
+        Write-Log "auto: budget authorized (headroom=$($snap.trailing30.headroom_pct)%), selecting claude"
+        $resolvedEngine = 'claude'
+      } else {
+        Write-Log "auto: budget gate red ($($snap.skip_reason)), selecting node"
+      }
+    } else {
+      Write-Log "auto: no snapshot file, defaulting to node"
+    }
+  } else {
+    Write-Log "auto: estimator failed (exit=$estimatorExit), defaulting to node" 'warn'
+  }
+
+  $Engine = $resolvedEngine
+  Write-Log "auto: resolved engine=$Engine"
+}
 
 if ($Engine -eq 'node') {
   # ---- Node engine: dispatch.mjs handles gates + work internally ----

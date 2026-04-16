@@ -32,34 +32,43 @@ export function runGates(config, opts = {}) {
     return { proceed: false, reason: "paused-sentinel" };
   }
 
-  // Step 1: Budget gate — run estimate-usage.mjs
-  // Skip for node engine: dispatch.mjs uses free-tier APIs, not Claude Max.
+  // Step 1: Budget gate — always refresh estimate, gate only for Claude engine.
+  // The node engine uses free-tier APIs and doesn't need budget gating, but
+  // refreshing the estimate keeps the snapshot current for auto-mode routing
+  // and monitoring (zero LLM cost — just local file scanning).
   let snapshot = null;
-  if (opts.engine === "node") {
-    console.log("[gates] budget gate skipped (node engine uses free-tier APIs)");
-  } else {
-    const estimatorScript = resolve(SCRIPTS_DIR, "estimate-usage.mjs");
-    try {
-      execFileSync("node", [estimatorScript], {
-        cwd: REPO_ROOT,
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 60_000,
-      });
-    } catch (e) {
+  const isNode = opts.engine === "node";
+  const estimatorScript = resolve(SCRIPTS_DIR, "estimate-usage.mjs");
+  try {
+    execFileSync("node", [estimatorScript], {
+      cwd: REPO_ROOT,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  } catch (e) {
+    if (!isNode) {
       return { proceed: false, reason: `estimator-error-exit-${e.status ?? "unknown"}` };
     }
+    console.warn(`[gates] estimator refresh failed (non-blocking for node engine): exit ${e.status}`);
+  }
 
-    const snapshotPath = resolve(REPO_ROOT, "status", "usage-estimate.json");
-    if (!existsSync(snapshotPath)) {
-      return { proceed: false, reason: "estimator-no-snapshot" };
-    }
-
+  const snapshotPath = resolve(REPO_ROOT, "status", "usage-estimate.json");
+  if (existsSync(snapshotPath)) {
     try {
       snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
     } catch (parseErr) {
-      return { proceed: false, reason: `estimator-snapshot-parse-error: ${parseErr.message}` };
+      if (!isNode) {
+        return { proceed: false, reason: `estimator-snapshot-parse-error: ${parseErr.message}` };
+      }
     }
+  }
 
+  if (isNode) {
+    console.log("[gates] budget estimate refreshed (node engine, not gating)");
+  } else {
+    if (!snapshot) {
+      return { proceed: false, reason: "estimator-no-snapshot" };
+    }
     if (!snapshot.dispatch_authorized) {
       return { proceed: false, reason: snapshot.skip_reason ?? "gate-red" };
     }
