@@ -253,6 +253,41 @@ function getBudgetDetail() {
   };
 }
 
+// ---- API: Project Docs (About tab) ----
+
+function getProjectDocs() {
+  const config = readJson(CONFIG_PATH);
+  if (!config) return { error: "config not found" };
+
+  const projects = (config.projects_in_rotation ?? []).map((proj) => {
+    const docs = {};
+    const tryRead = (name, ...paths) => {
+      for (const p of paths) {
+        const full = join(proj.path, p);
+        if (existsSync(full)) {
+          try { docs[name] = readFileSync(full, "utf8"); return; } catch { /* skip */ }
+        }
+      }
+    };
+    tryRead("claude_md", "CLAUDE.md");
+    tryRead("dispatch_md", "DISPATCH.md");
+    tryRead("state_md", "ai/STATE.md");
+    tryRead("roadmap_md", "ai/ROADMAP.md");
+    tryRead("decisions_md", "ai/DECISIONS.md");
+
+    return {
+      slug: proj.slug,
+      path: proj.path,
+      sandbox: proj.sandbox || false,
+      canary: proj.canary || false,
+      clinical_gate: proj.clinical_gate || false,
+      docs,
+    };
+  });
+
+  return { projects };
+}
+
 // ---- Mutations ----
 
 function setEngineOverride(engine) {
@@ -352,6 +387,7 @@ const server = createServer(async (req, res) => {
     json(res, getLogs(offset, Math.min(limit, 100), { outcome: outcome || undefined, project: project || undefined }));
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/project-docs") { json(res, getProjectDocs()); return; }
   if (req.method === "GET" && url.pathname === "/api/run-log") {
     const file = url.searchParams.get("file") || "";
     json(res, getRunLog(file));
@@ -533,6 +569,43 @@ const HTML_PAGE = `<!DOCTYPE html>
   .status-bar { font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 8px; }
   .dim { color: var(--text-dim); }
   a { color: var(--accent); }
+
+  /* About tab */
+  .about-project { margin-bottom: 20px; }
+  .about-project h3 { font-size: 15px; color: var(--accent); margin-bottom: 4px; }
+  .about-project .about-sub { font-size: 11px; color: var(--text-dim); margin-bottom: 12px; }
+  .about-section { margin-bottom: 12px; }
+  .about-section-header {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text);
+    transition: border-color .15s;
+  }
+  .about-section-header:hover { border-color: var(--accent); }
+  .about-section-header .arrow { font-size: 10px; transition: transform .2s; }
+  .about-section-header .arrow.open { transform: rotate(90deg); }
+  .about-section-header .tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 400; }
+  .about-section-header .tag.charter { background: rgba(122,162,247,.15); color: var(--accent); }
+  .about-section-header .tag.tasks { background: rgba(158,206,106,.15); color: var(--green); }
+  .about-section-header .tag.state { background: rgba(224,175,104,.15); color: var(--yellow); }
+  .about-section-header .tag.roadmap { background: rgba(187,154,247,.15); color: var(--magenta); }
+  .about-doc {
+    display: none; padding: 12px; margin-top: 4px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    max-height: 500px; overflow-y: auto;
+  }
+  .about-doc.open { display: block; }
+  .about-doc h4 { color: var(--accent); margin: 10px 0 4px 0; font-size: 12px; }
+  .about-doc .md-h1 { color: var(--accent); font-size: 14px; font-weight: 700; margin: 8px 0 4px; display: block; }
+  .about-doc .md-h2 { color: var(--cyan); font-size: 13px; font-weight: 700; margin: 8px 0 4px; display: block; }
+  .about-doc .md-h3 { color: var(--magenta); font-size: 12px; font-weight: 600; margin: 6px 0 2px; display: block; }
+  .about-doc .md-bold { font-weight: 700; }
+  .about-doc .md-done { color: var(--green); }
+  .about-doc .md-todo { color: var(--text-dim); }
+  .about-doc .md-table { border-collapse: collapse; margin: 6px 0; font-size: 11px; }
+  .about-doc .md-table th { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-dim); }
+  .about-doc .md-table td { padding: 3px 8px; border-bottom: 1px solid var(--border); }
 </style>
 </head>
 <body>
@@ -545,6 +618,7 @@ const HTML_PAGE = `<!DOCTYPE html>
   <button onclick="setTab('projects')">Projects</button>
   <button onclick="setTab('logs')">Logs</button>
   <button onclick="setTab('config')">Config</button>
+  <button onclick="setTab('about')">About</button>
 </div>
 
 <!-- ============ STATUS TAB ============ -->
@@ -654,11 +728,16 @@ const HTML_PAGE = `<!DOCTYPE html>
   <div class="card" id="cfg-params">Loading...</div>
 </div>
 
+<!-- ============ ABOUT TAB ============ -->
+<div id="view-about" class="view">
+  <div id="about-content">Loading...</div>
+</div>
+
 <div class="status-bar" id="status-bar">Connecting...</div>
 
 <script>
 // ---- State ----
-let state = null, prediction = null, budgetDetail = null, projectsData = null;
+let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null;
 let logEntries = [], logOffset = 0, logTotal = 0;
 let currentTab = localStorage.getItem('dash-tab') || 'status';
 let refreshTimer = null;
@@ -669,7 +748,7 @@ function setTab(name) {
   currentTab = name;
   localStorage.setItem('dash-tab', name);
   document.querySelectorAll('.tabs button').forEach((b, i) => {
-    const tabs = ['status','budget','projects','logs','config'];
+    const tabs = ['status','budget','projects','logs','config','about'];
     b.classList.toggle('active', tabs[i] === name);
   });
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -681,6 +760,7 @@ function setTab(name) {
   else if (name === 'projects') { fetchProjects(); }
   else if (name === 'logs') { if (logEntries.length === 0) resetLogs(); }
   else if (name === 'config') { fetchStatus(); }
+  else if (name === 'about') { fetchAbout(); }
 }
 
 // ---- Fetchers ----
@@ -706,6 +786,14 @@ async function fetchProjects() {
     projectsData = await (await fetch('/api/projects')).json();
     renderProjects();
   } catch (e) { document.getElementById('projects-list').textContent = 'Error: ' + e.message; }
+}
+
+async function fetchAbout() {
+  if (aboutData) { renderAbout(); return; } // cache -- docs don't change at runtime
+  try {
+    aboutData = await (await fetch('/api/project-docs')).json();
+    renderAbout();
+  } catch (e) { document.getElementById('about-content').textContent = 'Error: ' + e.message; }
 }
 
 async function resetLogs() {
@@ -1043,6 +1131,89 @@ function renderConfig() {
   html += '<div class="cfg-row"><span class="cfg-label">Paused (file)</span><span class="cfg-value ' + (state.pause_file_exists ? 'warn-c' : '') + '">' + (state.pause_file_exists ? 'EXISTS' : 'no') + '</span></div>';
   if (b?.generated_at) html += '<div class="cfg-row"><span class="cfg-label">Snapshot age</span><span class="cfg-value">' + timeAgo(new Date(b.generated_at)) + '</span></div>';
   document.getElementById('cfg-params').innerHTML = html;
+}
+
+// ---- Render: About ----
+function renderAbout() {
+  if (!aboutData || aboutData.error) { document.getElementById('about-content').textContent = aboutData?.error || 'Loading...'; return; }
+
+  let html = '';
+  aboutData.projects.forEach((proj, pi) => {
+    const flags = [proj.sandbox && 'sandbox', proj.canary && 'canary', proj.clinical_gate && 'clinical'].filter(Boolean);
+    html += '<div class="about-project">';
+    html += '<h3>' + esc(proj.slug) + '</h3>';
+    html += '<div class="about-sub">' + esc(proj.path) + (flags.length ? '  &middot;  ' + flags.join(', ') : '') + '</div>';
+
+    const sections = [
+      { key: 'claude_md', label: 'Charter (CLAUDE.md)', tag: 'charter' },
+      { key: 'dispatch_md', label: 'Tasks (DISPATCH.md)', tag: 'tasks' },
+      { key: 'state_md', label: 'Current State (ai/STATE.md)', tag: 'state' },
+      { key: 'roadmap_md', label: 'Roadmap (ai/ROADMAP.md)', tag: 'roadmap' },
+      { key: 'decisions_md', label: 'Decisions (ai/DECISIONS.md)', tag: 'state' },
+    ];
+
+    sections.forEach((sec, si) => {
+      if (!proj.docs[sec.key]) return;
+      const id = 'about-' + pi + '-' + si;
+      html += '<div class="about-section">';
+      html += '<div class="about-section-header" onclick="toggleAboutDoc(\\'' + id + '\\')">';
+      html += '<span class="arrow" id="arrow-' + id + '">&#9654;</span>';
+      html += '<span>' + esc(sec.label) + '</span>';
+      html += '<span class="tag ' + sec.tag + '">' + sec.tag + '</span>';
+      html += '</div>';
+      html += '<div class="about-doc" id="' + id + '">' + renderMd(proj.docs[sec.key]) + '</div>';
+      html += '</div>';
+    });
+
+    html += '</div>';
+  });
+
+  document.getElementById('about-content').innerHTML = html;
+}
+
+function toggleAboutDoc(id) {
+  const el = document.getElementById(id);
+  const arrow = document.getElementById('arrow-' + id);
+  if (el) { el.classList.toggle('open'); }
+  if (arrow) { arrow.classList.toggle('open'); }
+}
+
+function renderMd(raw) {
+  // Lightweight markdown-to-HTML for display (no dependency)
+  let text = esc(raw.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n'));
+
+  // Headers
+  text = text.replace(/^### (.+)$/gm, '<span class="md-h3">$1</span>');
+  text = text.replace(/^## (.+)$/gm, '<span class="md-h2">$1</span>');
+  text = text.replace(/^# (.+)$/gm, '<span class="md-h1">$1</span>');
+
+  // Bold
+  text = text.replace(/\\*\\*(.+?)\\*\\*/g, '<span class="md-bold">$1</span>');
+
+  // Checkboxes
+  text = text.replace(/^- \\[x\\] (.+)$/gm, '<span class="md-done">  &#10003; $1</span>');
+  text = text.replace(/^- \\[ \\] (.+)$/gm, '<span class="md-todo">  &#9744; $1</span>');
+
+  // Tables (simple: detect lines starting with |)
+  const lines = text.split('\\n');
+  let inTable = false;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trimStart().startsWith('|')) {
+      // Skip separator rows (|---|---|)
+      if (/^\\s*\\|[\\s-|]+\\|\\s*$/.test(line)) continue;
+      const cells = line.split('|').filter(Boolean).map(c => c.trim());
+      if (!inTable) { out.push('<table class="md-table">'); inTable = true; out.push('<tr>' + cells.map(c => '<th>' + c + '</th>').join('') + '</tr>'); }
+      else { out.push('<tr>' + cells.map(c => '<td>' + c + '</td>').join('') + '</tr>'); }
+    } else {
+      if (inTable) { out.push('</table>'); inTable = false; }
+      out.push(line);
+    }
+  }
+  if (inTable) out.push('</table>');
+
+  return out.join('\\n');
 }
 
 // ---- Actions ----
