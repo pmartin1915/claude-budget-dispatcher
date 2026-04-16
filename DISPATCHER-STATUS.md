@@ -1,6 +1,6 @@
 # Dispatcher Status & Engine Guide
 
-> Last updated: 2026-04-15 (Part 7 session)
+> Last updated: 2026-04-16 (Part 8 session)
 
 ---
 
@@ -60,7 +60,7 @@ There are **two engines** that can run the pipeline. They share the same wrapper
 
 | Concern | Claude engine | Free-model engine |
 |---|---|---|
-| Scheduled task | `ClaudeBudgetDispatcher` (disabled) | `BudgetDispatcher-Node` (active) |
+| Scheduled task | Selected by auto mode when budget allows | Selected by auto mode when budget is tight |
 | Fires every | 20 min | 20 min |
 | Cost | ~$0.20-1.00/run | $0.00/run |
 | Budget gate | Yes (protects subscription) | No (nothing to protect) |
@@ -80,24 +80,25 @@ There are **two engines** that can run the pipeline. They share the same wrapper
 
 ## How to switch between engines
 
-Both engines use the same mutex (`Global\claude-budget-dispatcher`), so they can't run simultaneously. To switch:
+Both engines use the same mutex (`Global\claude-budget-dispatcher`), so they can't run simultaneously.
 
-**Run free-model only (current setup):**
+**Auto mode (current setup -- recommended):**
 ```powershell
-# In Task Scheduler:
-# BudgetDispatcher-Node = Enabled
-# ClaudeBudgetDispatcher = Disabled
+# run-dispatcher.ps1 -Engine auto
+# Checks budget estimate on every firing:
+#   - If dispatch_authorized=true (budget has headroom) -> uses Claude engine
+#   - Otherwise -> uses free-model engine
+# Fail-safe: defaults to free models on any error
 ```
 
-**Run Claude only:**
-```powershell
-# In Task Scheduler:
-# BudgetDispatcher-Node = Disabled
-# ClaudeBudgetDispatcher = Enabled
-```
+The `BudgetDispatcher-Node` scheduled task uses `-Engine auto`. The old `ClaudeBudgetDispatcher` task is disabled and no longer needed.
 
-**Run both in alternation (future possibility):**
-Not yet implemented. Would require the scheduled tasks to interleave (e.g., Claude fires at :00/:40, Node fires at :20) or a wrapper that picks the engine per-run based on budget headroom. The mutex prevents races, but you'd want intentional scheduling.
+**Force a specific engine:**
+```powershell
+# Override auto mode for testing:
+.\scripts\run-dispatcher.ps1 -RepoRoot . -Engine node    # force free models
+.\scripts\run-dispatcher.ps1 -RepoRoot . -Engine claude  # force Claude (budget gate still applies)
+```
 
 ---
 
@@ -116,7 +117,7 @@ Not yet implemented. Would require the scheduled tasks to interleave (e.g., Clau
 
 ## Audit scorecard
 
-### Done (27 numbered + 4 unnumbered fixes + 3 bug fixes = 34 items)
+### Done (27 numbered + 4 unnumbered fixes + 3 bug fixes + 2 features = 36 items)
 
 | ID | What | Commit |
 |---|---|---|
@@ -150,6 +151,8 @@ Not yet implemented. Would require the scheduled tasks to interleave (e.g., Clau
 | -- | libuv crash fix (setImmediate drain) | `ae254c0` |
 | -- | Selector src/ hard-filter (prevents impossible task picks) | `9e4c66f` |
 | -- | Error visibility (all paths write JSONL + last-run + gist) | `09e692c` |
+| -- | Dual-engine auto mode (`-Engine auto`, budget-adaptive routing) | `ac5b7ef` |
+| -- | Stale worktree cleanup (auto/* branches > 7 days) | `12c8da7` |
 
 ### Open (2 -- deferred, need infrastructure)
 
@@ -172,61 +175,51 @@ Not yet implemented. Would require the scheduled tasks to interleave (e.g., Clau
 |---|---|
 | `dry_run` | `false` (live) |
 | `paused` | `false` |
-| Active engine | Free-model (`BudgetDispatcher-Node`) |
-| Claude engine | Disabled (`ClaudeBudgetDispatcher`) |
+| Engine mode | **Auto** (`-Engine auto`): Claude when budget allows, free models otherwise |
+| Scheduled task | `BudgetDispatcher-Node` (fires every 20 min with `-Engine auto`) |
+| Old Claude task | `ClaudeBudgetDispatcher` (disabled, superseded by auto mode) |
 | Activity gate | 20 min idle required |
 | Max runs/day | 50 |
 | Projects in rotation | `sandbox-workflow-enhancement`, `sandbox-canary-test` |
 | Gist sync | Active ([gist link](https://gist.github.com/pmartin1915/655d02ce43b293cacdf333a301b63bbf)) |
+| Budget estimate | Refreshed on every firing (even free-model runs) |
+| Worktree cleanup | Auto/* worktrees older than 7 days removed at startup |
 | Error visibility | All failure paths update JSONL + last-run.json + gist (`09e692c`) |
-| Last live dispatch | 2026-04-15 ~22:24 local, `roadmap-review` on `sandbox-workflow-enhancement`, Gemini 2.5 Pro, success |
 
 ---
 
 ## What's next
 
-### Free-model engine (active now)
+### Auto mode (active now)
 
-The free-model engine is fully operational. Every audit finding that applies to it is shipped. The only remaining items (S-1/S-2 sandbox isolation) are infrastructure-gated on WSL2 and would add defense-in-depth for generated test code -- not a blocker for normal operation.
+The dispatcher runs in `-Engine auto` mode. Every firing refreshes the budget estimate and picks the right engine:
+- **Budget has headroom** (`dispatch_authorized=true`): Claude engine handles the run, including `claude_only` tasks (plan, design, architecture, clinical, security)
+- **Budget is tight** (`dispatch_authorized=false`): Free-model engine handles the run with Gemini/Mistral/Codestral
+
+Every audit finding that applies to the free-model engine is shipped. The only remaining items (S-1/S-2 sandbox isolation) are infrastructure-gated on WSL2 and would add defense-in-depth for generated test code -- not a blocker for normal operation.
 
 **What to expect on your next idle window:**
+- Budget estimate refreshed (zero LLM cost)
+- Auto mode selects the appropriate engine
 - Selector picks a viable task (explore, audit, research, roadmap-review, or codegen on projects with source files)
-- Worker calls Gemini/Mistral/Codestral; if one 503s, falls back to the next
+- Worker calls the selected model; if one 503s, falls back to the next (free-model engine only)
 - Result committed to an `auto/` branch in the sandbox project
 - Log entry written, gist synced for laptop visibility
+- Stale worktrees older than 7 days cleaned up automatically
 
 **What you can do to expand it:**
 - Add more projects to `projects_in_rotation` in `config/budget.json`
 - Add source code to `sandbox-workflow-enhancement/src/` to unlock codegen/docs/test tasks on that project
 - The free-model engine has no cost ceiling -- rate limits are the only constraint, and fallback handles those
+- Claude engine activates automatically when your subscription budget has headroom
 
-### Claude engine (disabled, ready to re-enable)
+### Both engines together (auto mode -- shipped Part 8)
 
-The Claude engine hasn't been touched since the original implementation. All the hardening work (S-3 through R-7) applies to the free-model engine. The Claude engine's safety relies on Claude's in-loop judgment rather than explicit guards.
+Both engines work together via `-Engine auto` (budget-adaptive routing):
+- **Free-model engine** handles the volume -- explore, audit, docs, test gen, refactoring. Runs when budget is tight (most of the time). Costs nothing.
+- **Claude engine** handles the hard stuff -- architecture reviews, security audits, design decisions, clinical domain work. Runs when `dispatch_authorized=true` (budget has headroom).
 
-**To start using your subscription headroom:**
-1. Enable `ClaudeBudgetDispatcher` in Task Scheduler
-2. Disable `BudgetDispatcher-Node` (or set up alternation -- see below)
-3. The budget gate (`estimate-usage.mjs`) will only allow runs when you have weekly/monthly headroom
-
-**What the Claude engine can do that the free engine can't:**
-- `plan`, `design`, `architecture` tasks (reserved as `claude_only`)
-- `clinical` and `security` tasks on clinical-gated projects
-- Complex multi-file reasoning that benefits from Claude's judgment
-- Tasks where you want human-equivalent decision-making in the loop
-
-### Future: running both engines
-
-The ideal end state is both engines working together:
-- **Free-model engine** handles the volume -- explore, audit, docs, test gen, refactoring. Runs often, costs nothing.
-- **Claude engine** handles the hard stuff -- architecture reviews, security audits, design decisions, clinical domain work. Runs less often, only when budget allows.
-
-This could be implemented as:
-1. **Time-sliced:** Free-model fires at :16 and :56, Claude fires at :36 (when budget allows)
-2. **Budget-adaptive:** A single wrapper checks headroom. If flush, use Claude. If tight, use free models.
-3. **Task-routed:** Free-model engine returns `claude_only` tasks to a queue; Claude engine picks them up on its next firing.
-
-None of this is built yet. The mutex prevents races, so the simplest version is just manual toggling in Task Scheduler based on how your month is going.
+The budget estimate is refreshed on every firing (even free-model runs), so the auto mode always has current data. When the monthly budget resets or usage drops below pace, auto mode starts selecting Claude automatically.
 
 ---
 
