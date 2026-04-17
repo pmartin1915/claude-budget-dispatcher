@@ -323,6 +323,101 @@ function getProjectDocs() {
   return { projects };
 }
 
+// ---- Fleet: Roadmap Parser ----
+
+function parseRoadmap(md) {
+  const phases = [];
+  const sections = md.split(/^## /m).slice(1);
+
+  for (const section of sections) {
+    const nlIdx = section.indexOf("\n");
+    const name = (nlIdx === -1 ? section : section.slice(0, nlIdx)).trim();
+    const body = nlIdx === -1 ? "" : section.slice(nlIdx);
+
+    // Skip "Done" sections with nothing in them
+    if (/^done$/i.test(name) && /nothing yet/i.test(body)) continue;
+
+    let total = 0, done = 0;
+
+    // Strategy 1: Checkboxes (Format A — greenfield projects)
+    const checked = (body.match(/^- \[x\]/gmi) || []).length;
+    const unchecked = (body.match(/^- \[ \]/gm) || []).length;
+
+    if (checked + unchecked > 0) {
+      total = checked + unchecked;
+      done = checked;
+    }
+    // Strategy 2: Goal-based status lines (Format C — workflow-enhancement)
+    else if (/\*\*Status:\*\*/m.test(body)) {
+      const goals = body.split(/^### /m).slice(1);
+      total = goals.length;
+      for (const g of goals) {
+        if (/\*\*Status:\*\*\s*DONE/i.test(g)) done++;
+      }
+    }
+    // Strategy 3: Freeform bullets with done markers (Format B — combo)
+    else {
+      const bullets = (body.match(/^- .+$/gm) || []);
+      total = bullets.length;
+      done = bullets.filter((b) => /\*\(done/i.test(b) || /\*\(configured\)/i.test(b)).length;
+    }
+
+    if (total === 0) continue;
+
+    const status = done >= total ? "complete" : done > 0 ? "in-progress" : "not-started";
+    phases.push({ name, total, done, status });
+  }
+  return phases;
+}
+
+// ---- Fleet: Data Aggregator ----
+
+function getFleetData() {
+  const config = readJson(CONFIG_PATH);
+  if (!config) return { error: "config not found" };
+
+  const allLines = readLogLines();
+  const projects = (config.projects_in_rotation ?? []).map((proj) => {
+    // Try ROADMAP.md (root), then ai/ROADMAP.md
+    let roadmapMd = null;
+    let roadmapSource = null;
+    for (const rel of ["ROADMAP.md", "ai/ROADMAP.md"]) {
+      const full = join(proj.path, rel);
+      if (existsSync(full)) {
+        try { roadmapMd = readFileSync(full, "utf8"); roadmapSource = rel; break; } catch { /* skip */ }
+      }
+    }
+
+    const phases = roadmapMd ? parseRoadmap(roadmapMd) : null;
+
+    // Scan log for this project
+    let lastDispatch = null, totalDispatches = 0, lastTask = null;
+    for (let i = allLines.length - 1; i >= 0; i--) {
+      const obj = parseLogLine(allLines[i]);
+      if (!obj || obj.project !== proj.slug) continue;
+      if (obj.outcome === "skipped") continue;
+      totalDispatches++;
+      if (!lastDispatch) {
+        lastDispatch = obj.ts;
+        lastTask = obj.task || null;
+      }
+    }
+
+    return {
+      slug: proj.slug,
+      sandbox: proj.sandbox || false,
+      canary: proj.canary || false,
+      roadmap_source: roadmapSource,
+      phases,
+      last_dispatch: lastDispatch,
+      total_dispatches: totalDispatches,
+      last_task: lastTask,
+    };
+  });
+
+  return { projects };
+}
+
 // ---- Mutations ----
 
 function setEngineOverride(engine) {
@@ -423,6 +518,7 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/project-docs") { json(res, getProjectDocs()); return; }
+  if (req.method === "GET" && url.pathname === "/api/fleet") { json(res, getFleetData()); return; }
   if (req.method === "GET" && url.pathname === "/api/run-log") {
     const file = url.searchParams.get("file") || "";
     json(res, getRunLog(file));
@@ -643,6 +739,30 @@ const HTML_PAGE = `<!DOCTYPE html>
   .about-doc .md-table { border-collapse: collapse; margin: 6px 0; font-size: 11px; }
   .about-doc .md-table th { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-dim); }
   .about-doc .md-table td { padding: 3px 8px; border-bottom: 1px solid var(--border); }
+
+  /* Fleet tab */
+  .fleet-legend { display: flex; gap: 16px; margin-bottom: 16px; font-size: 11px; color: var(--text-dim); align-items: center; }
+  .fleet-legend-item { display: flex; align-items: center; gap: 4px; }
+  .fleet-legend-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+  .fleet-legend-swatch.complete { background: rgba(158,206,106,0.25); border-left: 3px solid var(--green); }
+  .fleet-legend-swatch.in-progress { background: rgba(224,175,104,0.25); border-left: 3px solid var(--yellow); }
+  .fleet-legend-swatch.not-started { background: var(--surface2); border-left: 3px solid var(--border); }
+  .fleet-row { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .fleet-row:last-child { border-bottom: none; }
+  .fleet-label { min-width: 160px; max-width: 200px; flex-shrink: 0; }
+  .fleet-slug { font-weight: 700; color: var(--accent); font-size: 13px; cursor: default; }
+  .fleet-slug .tag { font-weight: 400; font-size: 10px; color: var(--text-dim); margin-left: 4px; }
+  .fleet-meta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+  .fleet-phases { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .fleet-cell { display: inline-flex; flex-direction: column; justify-content: center; padding: 4px 8px; border-radius: 4px; min-width: 90px; max-width: 180px; height: 36px; font-size: 10px; line-height: 1.3; overflow: hidden; }
+  .fleet-cell.complete { background: rgba(158,206,106,0.18); border-left: 3px solid var(--green); color: var(--green); }
+  .fleet-cell.in-progress { background: rgba(224,175,104,0.18); border-left: 3px solid var(--yellow); color: var(--yellow); }
+  .fleet-cell.not-started { background: var(--surface2); border-left: 3px solid var(--border); color: var(--text-dim); }
+  .fleet-cell.no-roadmap { background: var(--surface2); border: 1px dashed var(--border); color: var(--text-dim); min-width: 120px; text-align: center; }
+  .fleet-cell-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .fleet-cell-count { font-size: 9px; opacity: 0.8; }
+  .fleet-summary { margin-top: 12px; font-size: 11px; color: var(--text-dim); display: flex; gap: 16px; }
+  .fleet-summary .val { font-weight: 700; }
 </style>
 </head>
 <body>
@@ -655,6 +775,7 @@ const HTML_PAGE = `<!DOCTYPE html>
   <button onclick="setTab('projects')">Projects</button>
   <button onclick="setTab('logs')">Logs</button>
   <button onclick="setTab('config')">Config</button>
+  <button onclick="setTab('fleet')">Fleet</button>
   <button onclick="setTab('about')">About</button>
 </div>
 
@@ -773,6 +894,11 @@ const HTML_PAGE = `<!DOCTYPE html>
   <div class="card" id="cfg-params">Loading...</div>
 </div>
 
+<!-- ============ FLEET TAB ============ -->
+<div id="view-fleet" class="view">
+  <div id="fleet-content">Loading...</div>
+</div>
+
 <!-- ============ ABOUT TAB ============ -->
 <div id="view-about" class="view">
   <div id="about-content">Loading...</div>
@@ -782,7 +908,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 <script>
 // ---- State ----
-let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null;
+let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null, fleetData = null;
 let logEntries = [], logOffset = 0, logTotal = 0;
 let currentTab = localStorage.getItem('dash-tab') || 'status';
 let refreshTimer = null;
@@ -793,7 +919,7 @@ function setTab(name) {
   currentTab = name;
   localStorage.setItem('dash-tab', name);
   document.querySelectorAll('.tabs button').forEach((b, i) => {
-    const tabs = ['status','budget','projects','logs','config','about'];
+    const tabs = ['status','budget','projects','logs','config','fleet','about'];
     b.classList.toggle('active', tabs[i] === name);
   });
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -805,6 +931,7 @@ function setTab(name) {
   else if (name === 'projects') { fetchProjects(); }
   else if (name === 'logs') { if (logEntries.length === 0) resetLogs(); }
   else if (name === 'config') { fetchStatus(); }
+  else if (name === 'fleet') { fetchFleet(); }
   else if (name === 'about') { fetchAbout(); }
 }
 
@@ -839,6 +966,13 @@ async function fetchAbout() {
     aboutData = await (await fetch('/api/project-docs')).json();
     renderAbout();
   } catch (e) { document.getElementById('about-content').textContent = 'Error: ' + e.message; }
+}
+
+async function fetchFleet() {
+  try {
+    fleetData = await (await fetch('/api/fleet')).json();
+    renderFleet();
+  } catch (e) { document.getElementById('fleet-content').textContent = 'Error: ' + e.message; }
 }
 
 async function resetLogs() {
@@ -1190,6 +1324,79 @@ function renderConfig() {
   html += '<div class="cfg-row"><span class="cfg-label">Paused (file)</span><span class="cfg-value ' + (state.pause_file_exists ? 'warn-c' : '') + '">' + (state.pause_file_exists ? 'EXISTS' : 'no') + '</span></div>';
   if (b?.generated_at) html += '<div class="cfg-row"><span class="cfg-label">Snapshot age</span><span class="cfg-value">' + timeAgo(new Date(b.generated_at)) + '</span></div>';
   document.getElementById('cfg-params').innerHTML = html;
+}
+
+// ---- Render: Fleet ----
+function renderFleet() {
+  if (!fleetData || fleetData.error) {
+    document.getElementById('fleet-content').textContent = fleetData?.error || 'Loading...';
+    return;
+  }
+
+  let html = '<div class="card">';
+  html += '<h2>Fleet Progress</h2>';
+
+  // Legend
+  html += '<div class="fleet-legend">';
+  html += '<div class="fleet-legend-item"><div class="fleet-legend-swatch complete"></div>Complete</div>';
+  html += '<div class="fleet-legend-item"><div class="fleet-legend-swatch in-progress"></div>In Progress</div>';
+  html += '<div class="fleet-legend-item"><div class="fleet-legend-swatch not-started"></div>Not Started</div>';
+  html += '</div>';
+
+  // Aggregate counters
+  let totalComplete = 0, totalInProgress = 0, totalNotStarted = 0, totalNoRoadmap = 0;
+
+  fleetData.projects.forEach((proj) => {
+    html += '<div class="fleet-row">';
+
+    // Label column
+    html += '<div class="fleet-label">';
+    html += '<div class="fleet-slug">' + esc(proj.slug);
+    if (proj.sandbox) html += '<span class="tag">sandbox</span>';
+    if (proj.canary) html += '<span class="tag">canary</span>';
+    html += '</div>';
+    const dispStr = proj.total_dispatches > 0
+      ? proj.total_dispatches + ' dispatch' + (proj.total_dispatches !== 1 ? 'es' : '') + ', last ' + timeAgo(new Date(proj.last_dispatch))
+      : 'never dispatched';
+    html += '<div class="fleet-meta">' + esc(dispStr) + '</div>';
+    if (proj.last_task) html += '<div class="fleet-meta">last: ' + esc(proj.last_task) + '</div>';
+    html += '</div>';
+
+    // Phase cells
+    html += '<div class="fleet-phases">';
+    if (!proj.phases || proj.phases.length === 0) {
+      html += '<div class="fleet-cell no-roadmap">No roadmap</div>';
+      totalNoRoadmap++;
+    } else {
+      proj.phases.forEach((ph) => {
+        if (ph.status === 'complete') totalComplete++;
+        else if (ph.status === 'in-progress') totalInProgress++;
+        else totalNotStarted++;
+
+        html += '<div class="fleet-cell ' + esc(ph.status) + '" title="' + esc(ph.name) + ' (' + ph.done + '/' + ph.total + ')">';
+        html += '<div class="fleet-cell-name">' + esc(ph.name) + '</div>';
+        html += '<div class="fleet-cell-count">' + ph.done + '/' + ph.total + '</div>';
+        html += '</div>';
+      });
+    }
+    html += '</div>';
+
+    html += '</div>'; // fleet-row
+  });
+
+  // Summary footer
+  const totalPhases = totalComplete + totalInProgress + totalNotStarted;
+  html += '<div class="fleet-summary">';
+  html += '<div><span class="val" style="color:var(--green)">' + totalComplete + '</span> complete</div>';
+  html += '<div><span class="val" style="color:var(--yellow)">' + totalInProgress + '</span> in progress</div>';
+  html += '<div><span class="val">' + totalNotStarted + '</span> not started</div>';
+  html += '<div><span class="val">' + totalPhases + '</span> total phases</div>';
+  if (totalNoRoadmap > 0) html += '<div><span class="val">' + totalNoRoadmap + '</span> no roadmap</div>';
+  html += '</div>';
+
+  html += '</div>'; // card
+
+  document.getElementById('fleet-content').innerHTML = html;
 }
 
 // ---- Render: About ----
