@@ -1,6 +1,108 @@
+# Handoff -- Part 16 (2026-04-17 19:35 UTC) -- Audit followup + open-questions brief
+
+> **READ THIS FIRST.** Part 16 supersedes Part 15 for current state. Read this TL;DR, then "Open questions -- state and recommended approach" (the reason this handoff exists). Then skim Part 15 below for the invariant protocol, failure-modes table, and guardrails -- those are still authoritative.
+
+## Part 16: TL;DR
+
+**This session:** ran the Part 15 invariant audit, found two composing bugs in `scripts/run-dispatcher.ps1` that survived Part 15, fixed both in commit `d909901`, pushed to `origin/main`. All six invariants green post-fix. No regressions. No work done on the Part 15 open questions -- they are summarized below for the next instance.
+
+**The two bugs (fixed, documented for pattern recognition):**
+1. `scripts/run-dispatcher.ps1:710` -- positional `gh gist edit $gistId $statusFile` was violating Part 15 guardrail #8 (multi-file gist needs `-a`). Every dispatch emitted `gist sync error: unsure what file to edit`. The sister health.json call on line 723 was correct; status file had just never been updated on the gist since Part 15 shipped. Fix: add `-a`.
+2. `scripts/run-dispatcher.ps1:683` -- local `$logFile` case-collided with script-scope `$LogFile` from line 87 (PowerShell variables are case-insensitive). After that line, every `Write-Log` in the `finally` block wrote `[timestamp] [warn] ...` text into `status/budget-dispatch-log.jsonl` instead of the per-run `.log`. 7 non-JSON lines accumulated; consumers (`health.mjs`, `dashboard.mjs`) already swallow parse errors so no functional break. Fix: dropped the redundant local, reused existing script-scope `$DispatcherLog` from line 88, added a 3-line comment documenting the case-insensitivity trap.
+
+Both audited with `mcp__pal__codereview` + `gemini-2.5-pro` before commit -- no issues found.
+
+**State check (2026-04-17 19:35 UTC):**
+- Health: **healthy** (last success 19:13Z on `wilderness`, hours_since_success 0.30)
+- 11 projects in rotation; `combo`, `boardbound`, `shortless-ios`, `wilderness` all had successful audit dispatches in the last hour (first time since Part 14 that the Optiplex/PC fleet was actually producing commits).
+- Pre-commit hook installed and matching; `node --check` clean across 21 `.mjs`; dashboard HTTP 200; auto/* branches growing in combo (15).
+- **The 5 greenfield sandboxes still have zero auto/* branches.** See open question 1.
+
+## Part 16: Open questions -- state and recommended approach
+
+These were Part 15's "open questions" and remain open after this session. Each block below is self-contained -- a next instance can pick any one and run.
+
+### 1. Greenfield sandboxes have never been dispatched
+
+**State:** 5 sandbox projects in [config/budget.json:139-172](config/budget.json#L139-L172) (`sandbox-biz-app`, `sandbox-game-adventure`, `sandbox-dnd-game`, `sandbox-sand-physics`, `sandbox-worldbuilder`). Each has `DISPATCH.md`, `ai/STATE.md`, `ROADMAP.md` (confirmed this session). None has `src/`.
+
+**Why they could be picked:** [scripts/lib/context.mjs:52-80](scripts/lib/context.mjs#L52-L80) accepts any project with a `DISPATCH.md` (they all have one) and filters their opportunistic_tasks to drop tasks in `NEEDS_SRC` (`docs-gen`, `tests-gen`, `session-log`, `jsdoc`, `add-tests`, `refactor`, `clean`). What's left for each sandbox: `explore`, `research`, `audit`, `self-audit`, `roadmap-review` -- all valid, all in the rotation config. Also confirmed: [scripts/lib/selector.mjs](scripts/lib/selector.mjs) rule 6 explicitly says "pick explore, research, audit, self-audit, or roadmap-review" for `has_source_files: false` projects -- so the prompt does NOT exclude them.
+
+**Why they haven't been picked yet:** Hypothesis, not verified. The selector is a Gemini call with full project STATE.md for every rotation entry. The 4 established projects (`combo`, `boardbound`, `shortless-ios`, `wilderness`) each have rich STATE.md with concrete issues that outrank "empty scaffold" under rules 1-3 (failing tests / stale status / least-recently-dispatched). Only four real dispatches have happened since the Part 15 fix shipped (combo 16:23, boardbound 17:13, shortless-ios 17:33, wilderness 19:13), so the rotation hasn't yet exhausted the "established" set.
+
+**Recommended approach for next instance:**
+1. **Do nothing for 24h first** -- the selector rule 3 (least-recently-dispatched tiebreaker) should eventually rotate to sandboxes once the 4 established slugs all have recent successes. Verify with `tail -100 status/budget-dispatch-log.jsonl | grep -o '"project":"[^"]*"' | sort | uniq -c`.
+2. If still zero sandbox dispatches after 24h, capture a selector trace. Easiest method: temporarily set `SELECTOR_DEBUG=1` (no such flag exists; add one that logs the full prompt and response to `status/selector-trace.log`). Inspect the prompt -- confirm sandboxes appear in the `## Projects` block; inspect the response `reason` -- confirm sandboxes are being evaluated but losing on rule priority.
+3. If the selector is starving them, soft fix: bias each sandbox's `ai/STATE.md` with a concrete "next step" (e.g., "audit the scaffold and document the first slice of scope"). That gives rule 2 something to bite on.
+4. Hard fix (only if 2-3 fail): add a `never_dispatched_bonus: true` field and a selector rule "if a project has never been dispatched, prefer it over any project dispatched in the last 6h unless rule 1 applies". This is a prompt-engineering change, not a code change.
+
+**Risk:** Low. Selector is a gated Gemini call with free-tier tokens. Experimenting doesn't cost Claude budget. But keep the audit discipline -- if you change [scripts/lib/selector.mjs](scripts/lib/selector.mjs) or [scripts/lib/context.mjs](scripts/lib/context.mjs), both are hot-path per Part 15 guardrail #3.
+
+### 2. boardbound date-sensitive test failures
+
+**State:** Part 15's verify-commit fix made `audit` dispatches succeed on boardbound (docs-only skip of `npm test`). But `tests-gen`, `refactor`, `fix` still run the full vitest suite ([package.json](../../boardbound/package.json) -- `"test": "vitest run"`). Two tests are known-failing due to date/time sensitivity. Any non-audit dispatch on boardbound will revert with `final-test-failure`.
+
+**What's needed, scoped small to large:**
+1. **Surgical (recommended):** `cd /c/Users/perry/DevProjects/boardbound && npm test 2>&1 | grep -A 3 -i "FAIL\|expected"` to identify the 2 tests. Patch them to mock `Date.now()` / `new Date()` via `vi.useFakeTimers(); vi.setSystemTime(...)`. One PR, no dispatcher change.
+2. **Config-based:** Add `test_exclude_patterns: ["**/date-sensitive.test.ts"]` to the boardbound entry in `config/budget.json`. Teach [scripts/lib/verify-commit.mjs](scripts/lib/verify-commit.mjs) to pass `--exclude` to vitest when running in a worktree. More invasive; creates config drift between dispatcher-view and dev-view of the test suite.
+3. **Two-tier test script:** Add `npm run test:dispatch` to boardbound's package.json that runs a stable subset. Have verify-commit prefer it when present. Cleanest long-term but the pattern must propagate to every project.
+
+**Recommendation:** Option 1. Two tests, one PR, no dispatcher risk. Only fall back to 2 or 3 if the failing tests turn out to test date/time semantics as business logic (e.g., weekly-board regeneration by real wall-clock date) rather than incidental currentness.
+
+**Risk:** Low. The fix is in the dev repo, not the dispatcher. If you break boardbound's tests, dispatches revert -- they don't corrupt anything.
+
+### 3. Cross-machine status board (Issue #1) -- no instance uses it yet
+
+**State:** [scripts/status.mjs](scripts/status.mjs) shipped in Part 14. Mature: `checkin`, `checkout`, `conflict`, `read`, `tasks`, `check` subcommands. Posts structured comments to `pmartin1915/claude-budget-dispatcher` issue #1. Zero code paths in `dispatch.mjs` call it today. Gap: nothing records which machine ran which dispatch.
+
+**Naive wiring concern:** Current dispatcher cadence is every 20 min from Task Scheduler. Wiring `checkin` + `checkout` to every wrapper invocation = 144 comments/day on issue #1, most of them user-active skips. That floods the board and makes real events invisible.
+
+**Recommended wiring:**
+- Call `checkin` from [scripts/dispatch.mjs](scripts/dispatch.mjs) **only after** the user-active/budget gates pass (Phase 1/2), right before invoking the delegate. Reason: we only want a record of dispatches that actually touched code.
+- Call `checkout` from the same place at end-of-phase-5 on `outcome: success` OR `outcome: reverted`. Include the project slug, task class, commit hash (or "reverted -- <reason>"), and wrapper duration.
+- Do NOT call on `skipped` / user-active. That keeps the board to 5-15 comments/day matching real dispatch count.
+- Spawn `status.mjs` as a child process with `spawn` + `detached: true` + `unref()` -- the dispatcher must not block on a gh API call for a status comment. Failures should log to `console.error` (goes to per-run .log, not JSONL -- remember Bug B pattern).
+
+**Alternative (lighter touch):** Skip issue comments entirely. Write `status/fleet.json` with `{ machine, last_dispatch_ts, last_project, last_task, last_outcome }` per machine and sync it to the existing gist as a new file. Dashboard reads it on load. No issue noise, no gh rate limiting, visible on any machine via `gh gist view 655d02ce43b293cacdf333a301b63bbf -f fleet.json`. This actually aligns better with Part 15's health.json pattern.
+
+**Recommendation:** Build the lighter-touch fleet.json sync first (4 lines of code added to the existing gist sync block in `run-dispatcher.ps1`, matching the health.json pattern). Keep `status.mjs` as the "explicit human check-in when doing cross-machine coordination" tool it was built for. Don't wire it into the dispatch loop.
+
+**Risk:** Medium. If you spawn `status.mjs` from dispatch.mjs and it hangs, the dispatcher hangs. The detached+unref pattern mitigates but doesn't eliminate. The fleet.json alternative has zero new failure modes -- the gist sync is already in place and proven in this session.
+
+### 4. Separate API keys per machine
+
+**State:** [config/budget.json:87-91](config/budget.json#L87-L91) declares providers (`groq`, `openrouter`, `ollama`) with `env_key` names. Dispatcher reads from `process.env` at runtime. No code change needed to split keys -- just a different `[Environment]::SetEnvironmentVariable(...)` on each machine. Perry is planning to do this for rate-limit isolation on the Optiplex; no dispatcher-side work required.
+
+**Action for next instance:** None unless Perry asks. If he does: confirm each machine's env vars via `Get-ChildItem env:GROQ_API_KEY, env:OPENROUTER_API_KEY, env:GEMINI_API_KEY, env:MISTRAL_API_KEY` and verify the keys are distinct per machine. No code ships.
+
+### 5. Gist ID visible in repo
+
+**State:** [config/budget.json:178](config/budget.json#L178) has `status_gist_id: 655d02ce43b293cacdf333a301b63bbf`. Gist is public-readable. No credentials leak, but anyone with the ID can monitor dispatch state + health.
+
+**Action for next instance:** None unless scope grows to include sensitive data. Flagged for awareness. If you add a new file to the gist sync, confirm it contains no secrets, no API responses, no stderr (Part 15 guardrail #2).
+
+## Part 16: What still applies from Part 15
+
+All of the following are unchanged and still authoritative:
+
+- **Invariant checks** (Part 15 "What the next instance MUST audit"). All 6 pass as of 19:35 UTC. Re-run them before touching code.
+- **Failure modes table** (Part 15). Add two rows from this session:
+  | Failure | Tell | Root cause | Fix |
+  |---|---|---|---|
+  | Every run logs `gist sync error: unsure what file to edit` | `tail -5 status/budget-dispatch-log.jsonl` shows `[warn] gist sync error ...` lines mixed with JSON | Positional `gh gist edit <id> <file>` on a multi-file gist | Use `gh gist edit <id> -a <file>` |
+  | Non-JSON lines appearing in `budget-dispatch-log.jsonl` | `grep -c "^\[" status/budget-dispatch-log.jsonl` > 0 | A local variable in `run-dispatcher.ps1` case-collides with a script-scope `$Var` (PowerShell is case-insensitive) | Rename local, OR reuse the script-scope var; add a comment at the collision site |
+- **Guardrails** (Part 15 "Be paranoid about these"). All 8 still apply. Guardrail #8 (gist `-a` flag) is now enforced on both known call sites -- any new `gh gist edit` call must follow the same pattern.
+- **Ops reference** (Part 15 "Quick ops reference"). Unchanged.
+
+## Part 16: Audit discipline -- carry this forward
+
+The Part 15 process (implement → `mcp__pal__codereview` with `gemini-2.5-pro` → commit) caught three classes of bugs last session and zero issues in this session's review. Zero is not a waste: it's the confirmation that the fix is minimal and the surrounding code is clean. Keep the gate. Hot-path files per Part 15 guardrail #3 -- `verify-commit.mjs`, `dispatch.mjs`, `worker.mjs`, `provider.mjs`, `router.mjs`, `throttle.mjs`, plus `run-dispatcher.ps1` and `selector.mjs`/`context.mjs` based on this session's findings -- always audit before commit.
+
+---
+
 # Handoff -- Part 15 (2026-04-17) -- Hardening session
 
-> **READ THIS FIRST.** Part 15 supersedes all previous parts. Every new instance should read the TL;DR, then "What the next instance MUST audit", then "Failure modes and their tells". Parts 13-14 are historical context below.
+> Superseded by Part 16 for current state and open-questions brief. Kept below for the invariant protocol, failure-modes table, and guardrails -- those are still authoritative.
 
 ## Part 15: TL;DR
 
