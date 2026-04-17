@@ -1,6 +1,55 @@
+# Handoff -- Part 17 (2026-04-17 20:35 UTC) -- Audit checkpoint + Opus/Sonnet workflow
+
+> **READ THIS FIRST.** Part 17 supersedes Part 16 for current state. No code changed this session. Part 17 is an audit checkpoint confirming Part 16's fixes are holding 1h+ post-ship, a refreshed `HANDOFF-PROMPT.md`, and a codified Opus/Sonnet + PAL MCP workflow. Read Part 16 below for the three open questions; read Part 15 below that for the invariant protocol and guardrails -- both still authoritative.
+
+## Part 17: TL;DR
+
+- **No code changes.** This session ran the Part 15 invariant audit as a fresh instance, rewrote the stale `HANDOFF-PROMPT.md` (was Part 12-era), and prepended this checkpoint.
+- **Part 16 fixes are verifiably holding.** 0 new JSONL pollution since `d909901`; the gist status-file sync is working (first time since Part 15).
+- **Correction to Part 16's handoff narrative:** the "4-second race" between the last polluted line and the commit was wrong. Actual commit time is `19:29:11Z`, last polluted line is `19:13:26Z` -- real margin is ~16 minutes. Conclusion (fix holding) is unchanged.
+- **3 open questions unchanged.** No progress this session; Part 16's ranked recommendations still stand.
+
+## Part 17: State check (2026-04-17 20:35 UTC)
+
+| Check | Result |
+|---|---|
+| Local health | `healthy (ok)`, last success 19:13Z on `wilderness`, consecutive_errors=0, hours_since_success 1.31 |
+| Gist sync | `health.json` + `budget-dispatch-last-run.json` both match local; last-run ts 20:32:16Z |
+| JSONL pollution | **10** polluted lines total (Part 16 said 7 at write-time; 3 more accumulated at 12:52 / 13:12 / 13:32 / 13:52 / 14:13 local before `d909901` shipped at 14:29:11 local). All pre-fix. |
+| Post-commit runs | 14:32 / 14:52 / 15:12 / 15:32 Z scheduled + ≥4 user-active skips 19:32-20:32Z -- all clean, **zero new pollution** |
+| Pre-commit hook | installed, matches `scripts/hooks/pre-commit` |
+| Scheduled task | `BudgetDispatcher-Node` `LastTaskResult=0`, `NextRun 15:52 local` |
+| Project rotation (last 100 entries) | `combo`×2, `wilderness`×1, `shortless-ios`×1, `boardbound`×1. 5 sandboxes still at **zero** dispatches -- Open Question 1 unchanged |
+| Git log | `ee46587` on top of `d909901`, both on `origin/main` |
+
+## Part 17: New pollution canary
+
+Add this to the cold-start checklist: `grep -c '^\[' status/budget-dispatch-log.jsonl` → **must stay 10**. Growth = regression of Part 16 Bug B (a `finally` block in `run-dispatcher.ps1` writing to the JSONL log instead of the per-run `.log`). The next instance should treat an 11th polluted line as an immediate incident, not a warning.
+
+## Part 17: New guardrail -- Opus/Sonnet workflow + PAL MCP audit gate
+
+The dispatcher has a 23h-outage precedent (Part 15). Hot-path regressions are high-blast-radius; plan-before-implement is non-optional for any change to the files listed in Part 15 guardrail #3 (now expanded -- see Part 16 line 99). Adopt:
+
+- **Opus 4.7 (1M ctx)** for plan mode, audits, handoff writing, `mcp__pal__codereview` orchestration, and any change touching hot-path files. The 1M context is worth its cost when reasoning across multiple `scripts/lib/*.mjs` files at once.
+- **Sonnet 4.6** for the mechanical implementation phase after `ExitPlanMode`. Faster and cheaper for straightforward edits. Switch back to Opus for the pre-commit review pass.
+- **`mcp__pal__codereview` with `gemini-2.5-pro`** is the final gate before any hot-path commit. Fallback to `review_validation_type: "internal"` only when Gemini 503s. Part 15's audit found 5 real issues (secret leak, IFS shell bug, over-narrow extension whitelist, PowerShell `${var}:` interpolation, cache-miss perf) before they shipped; the gate earns its keep.
+- **`mcp__pal__consensus`** is the right tool for the 3 open questions -- each is a judgment call (wait-vs-bias, surgical-vs-config, issue-comments-vs-fleet.json). Don't guess; ask 2-3 models.
+
+Full paste-ready briefing is in `HANDOFF-PROMPT.md` (rewritten this session). See Part 16 below for open-question detail, Part 15 below that for invariants and guardrails.
+
+## Part 17: Open questions -- no movement
+
+All 3 remain open exactly as ranked in Part 16. No new data changes the recommendations:
+
+1. Greenfield sandboxes still at zero auto/* branches. Selector rotation hasn't exhausted the 4 established projects yet (only 5 real dispatches total since Part 15 shipped).
+2. boardbound date-sensitive vitest failures unaddressed -- audits succeed; `tests-gen`/`refactor`/`fix` will still revert.
+3. Cross-machine status board not wired; `status.mjs` unused by `dispatch.mjs`.
+
+---
+
 # Handoff -- Part 16 (2026-04-17 19:35 UTC) -- Audit followup + open-questions brief
 
-> **READ THIS FIRST.** Part 16 supersedes Part 15 for current state. Read this TL;DR, then "Open questions -- state and recommended approach" (the reason this handoff exists). Then skim Part 15 below for the invariant protocol, failure-modes table, and guardrails -- those are still authoritative.
+> Superseded by Part 17 for current state. Kept for the three open-question briefs and the failure-modes table updates -- both still authoritative.
 
 ## Part 16: TL;DR
 

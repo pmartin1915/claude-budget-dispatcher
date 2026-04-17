@@ -2,75 +2,69 @@
 
 Paste this into the next Claude Code session:
 
-```
-Resume work on claude-budget-dispatcher.
+~~~
+Resume claude-budget-dispatcher.
 
-Required reading:
-1. DISPATCHER-STATUS.md (dual-engine guide, scorecard, current state)
-2. git log --oneline main -25
-3. HANDOFF.md (Part 12 context + gotchas list at bottom)
+## Required reading (in order)
 
-Current state: Everything is live and working. Tray app (.exe) running,
-auto mode active, both engines validated, 89 successful overnight runs.
-The system works -- it just needs real projects to work ON.
+1. HANDOFF.md -- Part 17 first (TL;DR + state check), then Part 16 (open questions), then Part 15 (invariant protocol, failure-modes table, guardrails).
+2. git log --oneline -10
+3. status/health.json  (or `gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json` from any machine)
 
-Priority for this session: Add real projects to the dispatcher rotation.
+## Before touching code: run the 6 invariants from Part 15
 
-The dispatcher currently bounces between two sandbox repos. Perry wants
-his actual codebases improved overnight. The HANDOFF.md "what's left"
-section has the full plan, but here's the short version:
+1. node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json  → expect "healthy (ok)"
+2. Pre-commit hook installed: `diff scripts/hooks/pre-commit .git/hooks/pre-commit`  → empty
+3. `node --check` on every .mjs under scripts/  (pre-commit hook does this; verify manually on cold clones)
+4. Dashboard loads: http://localhost:7380 → Fleet tab renders 11 projects
+5. status/budget-dispatch-last-run.json fresh (<1h if user-active window, <4h if idle-eligible)
+6. `cd ../combo && git branch --list 'auto/*' | wc -l`  → should grow over time (was 15 at Part 17 write)
 
-1. Start with combo (already cloned at c:\Users\perry\DevProjects\combo,
-   has CLAUDE.md). Check if it has DISPATCH.md; if not, create one with
-   pre-approved tasks (audit, explore, tests-gen, docs-gen). Add it to
-   projects_in_rotation in config/budget.json. Verify with:
-   node scripts/dispatch.mjs --force --dry-run
+## Pollution canary (added in Part 17)
 
-2. Clone 2-3 more repos from github.com/pmartin1915:
-   - boardbound (TypeScript, recently active)
-   - shortless-ios (Swift, iOS content blocker -- Perry specifically wants iOS apps)
-   - wilderness (React + TypeScript game, has Playwright tests)
-   Create CLAUDE.md and DISPATCH.md for each. Add to rotation.
+`grep -c '^\[' status/budget-dispatch-log.jsonl`  → should be **10** and stay 10 forever.
+If it grows: new run-dispatcher.ps1 case-collision or another Write-Log path bleeding into JSONL. See Part 16 Bug B.
 
-3. For any medical/clinical repos (medilex, ecg-wizard-pwa), set
-   clinical_gate: true in the budget.json entry.
+## Open questions -- pick one and run (full detail in HANDOFF.md Part 16)
 
-4. Verify each project dispatches before adding the next:
-   node scripts/dispatch.mjs --force --dry-run
+1. **Greenfield sandboxes have never been dispatched** (5 projects, zero auto/* branches). Recommended path: wait 24h → trace selector → soft STATE.md bias → hard `never_dispatched_bonus`. Start with observation, not code.
+2. **boardbound date-sensitive vitest failures** block non-audit dispatches. Recommended: surgical `vi.useFakeTimers()` fix in the boardbound repo, not the dispatcher.
+3. **Cross-machine status board**: build the lighter-touch `fleet.json` gist-sync (~4 lines in run-dispatcher.ps1 mirroring the health.json flow). Do NOT wire scripts/status.mjs into dispatch.mjs -- 144 comments/day flood risk.
 
-The config format for projects_in_rotation is in config/budget.example.json.
-Each entry needs: slug, path (absolute), clinical_gate (bool),
-opportunistic_tasks (array of task strings).
+## Audit discipline -- MANDATORY on hot-path files
 
-After existing repos are added, create greenfield "extra-sub-standalone" projects.
-These are NEW repos the AI builds from scratch over multiple dispatch cycles:
-- extra-sub-standalone-biz-app (business app/model tool)
-- extra-sub-standalone-game-adventure (a playable game)
-- extra-sub-standalone-dnd-math (D&D math game with lore and mechanics)
-- extra-sub-standalone-sand-physics (falling sand / particle physics game)
-- extra-sub-standalone-worldbuilder (worldbuilding: lore, maps, factions)
+Hot-path = dispatch.mjs, worker.mjs, verify-commit.mjs, provider.mjs, router.mjs, throttle.mjs, selector.mjs, context.mjs, run-dispatcher.ps1, scripts/lib/health.mjs.
 
-Each gets: git init, CLAUDE.md (project charter), DISPATCH.md (tasks),
-STATE.md (continuity between cycles), ROADMAP.md (goals). Add to rotation.
-The model reads STATE.md each cycle to know what was done and what's next.
-First tasks: plan, scaffold. Then implement, audit, repeat. Over days/weeks
-these grow from empty repos into real applications.
+Before any commit that touches hot-path:
+  mcp__pal__codereview  with  model: "gemini-2.5-pro"
+Fallback: review_validation_type: "internal" if Gemini 503s.
+Zero findings is not a waste -- it confirms the change is minimal.
 
-See HANDOFF.md "Priority 2" for full details and the self-improvement loop.
+Docs-only changes (HANDOFF.md, README, config comments) do NOT need codereview.
 
-Other future work:
-- WebSocket for live dashboard updates
-- Budget trend sparkline
+## Suggested workflow (Opus <-> Sonnet swap, Part 17)
 
-Tools available:
-- Tray app: bin\BudgetDispatcher.exe (running, green dot in tray)
-- Dashboard: node scripts/dashboard.mjs (localhost:7380)
-- CLI: node scripts/control.mjs
-- Launcher: scripts/dashboard-launcher.cmd
+- **Opus 4.7 (1M ctx)** = planning + audit. Use for: understanding invariants, tracing bugs, writing handoffs, orchestrating mcp__pal__codereview, judging hot-path risk. Default to Plan mode on any change touching hot-path.
+- **Sonnet 4.6** = implementation once a plan is approved. Switch to it after ExitPlanMode for the mechanical edit phase; switch back to Opus for the pre-commit review pass.
+- **One-shot audits** (no code change): Opus + invariant commands + a short chat update. No Plan mode needed.
 
-Before any commit: run mcp__pal__codereview with model: "gemini-2.5-pro".
-Fallback to review_validation_type: "internal" if Gemini is 503-ing.
-Do NOT flip dry_run back to true. Do NOT re-enable ClaudeBudgetDispatcher.
-Do NOT use gemini-3-pro-preview. Do NOT add -ForceBudget to scheduled task.
-Do NOT kill BudgetDispatcher.exe unless rebuilding.
-```
+## PAL MCP toolbelt
+
+- `mcp__pal__codereview` (gemini-2.5-pro): final gate before hot-path commits.
+- `mcp__pal__precommit`: sanity-check pending diff before push.
+- `mcp__pal__thinkdeep`: stuck on a root cause, or the symptom doesn't match any failure-mode row in Part 15.
+- `mcp__pal__consensus`: judgment calls (e.g. "wait-24h vs. add never_dispatched_bonus"). Get 2-3 model views.
+- `mcp__pal__debug`: surgical investigation in unfamiliar code paths.
+
+## Do NOT
+
+- flip `dry_run` back to true
+- re-enable the old `ClaudeBudgetDispatcher` task (the `BudgetDispatcher-Node` node engine is authoritative)
+- use `gemini-3-pro-preview`
+- add `-ForceBudget` to the scheduled task
+- use positional `gh gist edit <id> <file>` -- always `-a <file>` on multi-file gists (Part 15 guardrail #8, Part 16 Bug A)
+- add a local variable in `run-dispatcher.ps1` whose name case-matches a script-scope `$Var` (Part 16 Bug B -- PowerShell is case-insensitive, collision silently redirects Write-Log)
+- put test stderr into any JSON that flows to `budget-dispatch-log.jsonl` (Part 15 guardrail #2 -- that file is gist-sync candidate)
+- commit hot-path code without `mcp__pal__codereview` gemini-2.5-pro
+- push the handoff commit without Perry's "say the word"
+~~~
