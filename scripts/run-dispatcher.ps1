@@ -680,10 +680,12 @@ if ($Engine -eq 'node') {
   # the dispatcher has stopped producing successful commits.
   $healthFile = Join-Path $RepoRoot 'status\health.json'
   $healthScript = Join-Path $RepoRoot 'scripts\lib\health.mjs'
-  $logFile = Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl'
-  if ((Test-Path $healthScript) -and (Test-Path $logFile)) {
+  # Reuse script-scope $DispatcherLog (set at line 88). Do NOT redeclare a
+  # local named $logFile here -- PowerShell variables are case-insensitive,
+  # and that would retarget Write-Log (which writes to $LogFile) into the JSONL.
+  if ((Test-Path $healthScript) -and (Test-Path $DispatcherLog)) {
     try {
-      $healthOut = & node $healthScript $logFile $healthFile 2>&1
+      $healthOut = & node $healthScript $DispatcherLog $healthFile 2>&1
       if ($LASTEXITCODE -ne 0) {
         Write-Log "health.mjs exited ${LASTEXITCODE}: $healthOut" 'warn'
       }
@@ -707,7 +709,7 @@ if ($Engine -eq 'node') {
     $statusFile = Join-Path $RepoRoot 'status\budget-dispatch-last-run.json'
     if (Test-Path $statusFile) {
       try {
-        & gh gist edit $gistId $statusFile *>$null
+        & gh gist edit $gistId -a $statusFile *>$null
         if ($LASTEXITCODE -ne 0) {
           Write-Log "gist sync failed (gh exit=$LASTEXITCODE)" 'warn'
         }
