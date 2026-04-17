@@ -10,6 +10,7 @@ config/PAUSED
 status/usage-estimate.json
 status/budget-dispatch-log.jsonl
 status/budget-dispatch-last-run.json
+status/health.json
 
 # Weekly maintenance marker files (C-4 git fsck, S-8 npm audit)
 status/last-*.txt

@@ -1,34 +1,75 @@
 #!/bin/sh
-# R-6: Reject non-ASCII bytes in .ps1 files.
-# PowerShell 5.1 reads .ps1 as Windows-1252 by default — multi-byte UTF-8
+# Pre-commit hook. Runs both checks; any failure blocks the commit.
+
+# Literal newline in quotes -- $(printf '\n') returns empty because command
+# substitution strips trailing newlines.
+nl='
+'
+tmp=".git/.precommit-syntax-check.mjs"
+
+# Clean up temp file on any exit (success, failure, or interrupt).
+trap 'rm -f "$tmp"' EXIT
+
+# Split file lists on newline only, so filenames containing spaces work correctly.
+OLD_IFS=$IFS
+IFS=$nl
+
+# ---- R-6: Reject non-ASCII bytes in .ps1 files ----
+# PowerShell 5.1 reads .ps1 as Windows-1252 by default -- multi-byte UTF-8
 # characters (smart quotes, em dashes, accented chars) break the parser.
 # This has caused two production bugs already.
 
 ps1_files=$(git diff --cached --name-only --diff-filter=ACM | grep -i '\.ps1$')
-
-if [ -z "$ps1_files" ]; then
-  exit 0
-fi
-
-bad_files=""
+ps1_bad=""
 for f in $ps1_files; do
-  # Check staged content (not working tree) for non-ASCII bytes
+  [ -z "$f" ] && continue
   if git show ":$f" | LC_ALL=C grep -Pn '[^\x00-\x7F]' > /dev/null 2>&1; then
-    bad_files="$bad_files  $f\n"
+    ps1_bad="${ps1_bad}  ${f}${nl}"
   fi
 done
 
-if [ -n "$bad_files" ]; then
+# ---- SYNTAX-1: Reject .mjs files that fail node --check ----
+# Added 2026-04-17. A laptop commit put a literal "/* */" inside a JSDoc /** ... */
+# block; the inner */ closed the outer comment, turning the rest of the line into
+# a parse error that broke every dispatch for 5+ hours. node --check catches this
+# class of bug at commit time.
+
+mjs_files=$(git diff --cached --name-only --diff-filter=ACM | grep -i '\.mjs$')
+mjs_bad=""
+for f in $mjs_files; do
+  [ -z "$f" ] && continue
+  if ! git show ":$f" > "$tmp" 2>/dev/null; then
+    mjs_bad="${mjs_bad}${nl}=== ${f} ===${nl}ERROR: could not read staged content via git show.${nl}"
+    continue
+  fi
+  err=$(node --check "$tmp" 2>&1 >/dev/null)
+  if [ -n "$err" ]; then
+    mjs_bad="${mjs_bad}${nl}=== ${f} ===${nl}${err}${nl}"
+  fi
+done
+
+IFS=$OLD_IFS
+
+# ---- Report + decide ----
+# Use printf '%s\n' (not "$var" directly) so Windows paths containing \U etc.
+# are treated as literals, not escape sequences.
+failed=0
+if [ -n "$ps1_bad" ]; then
   echo "ERROR: Non-ASCII characters found in .ps1 file(s):"
-  echo ""
-  printf "$bad_files"
-  echo ""
+  printf '%s\n' "$ps1_bad"
   echo "PowerShell 5.1 requires pure ASCII (or UTF-8 with BOM)."
-  echo "Remove non-ASCII characters or save with UTF-8+BOM encoding."
-  echo ""
   echo "To find the offending characters:"
-  echo "  git show :FILENAME | LC_ALL=C grep -Pn '[^\x00-\x7F]'"
-  exit 1
+  echo "  git show :FILENAME | LC_ALL=C grep -Pn '[^\\x00-\\x7F]'"
+  echo ""
+  failed=1
 fi
 
-exit 0
+if [ -n "$mjs_bad" ]; then
+  echo "ERROR: Syntax error(s) in staged .mjs file(s):"
+  printf '%s\n' "$mjs_bad"
+  echo "Fix the error(s) or unstage the file with 'git restore --staged <file>'."
+  echo ""
+  failed=1
+fi
+
+exit $failed

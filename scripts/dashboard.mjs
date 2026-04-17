@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, exec, execFileSync } from "node:child_process";
 
 import { resolveModel } from "./lib/router.mjs";
+import { computeHealth } from "./lib/health.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -66,6 +67,19 @@ function esc(s) {
 let _taskCache = null;
 let _taskCacheTime = 0;
 const TASK_CACHE_TTL = 60_000;
+
+// ---- Dispatcher Health (cached, reads JSONL log) ----
+let _healthCache = null;
+let _healthCacheTime = 0;
+const HEALTH_CACHE_TTL = 60_000;
+
+function getCachedHealth() {
+  const now = Date.now();
+  if (_healthCache && now - _healthCacheTime < HEALTH_CACHE_TTL) return _healthCache;
+  _healthCache = computeHealth(LOG_PATH);
+  _healthCacheTime = now;
+  return _healthCache;
+}
 
 function getScheduledTaskInfo() {
   const now = Date.now();
@@ -130,6 +144,7 @@ function getState() {
     today_runs: countTodayRuns(),
     activity_gate: config.activity_gate ?? {},
     scheduled_task: getScheduledTaskInfo(),
+    health: getCachedHealth(),
   };
 }
 
@@ -588,6 +603,13 @@ const HTML_PAGE = `<!DOCTYPE html>
   .card h2 { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; font-weight: 600; }
 
   /* Health Beacon */
+  /* Health banner -- only shown when dispatcher is in "down" state */
+  .health-banner { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border-radius: 8px; margin-bottom: 12px; background: var(--red); color: #000; font-weight: 600; box-shadow: 0 0 0 2px var(--red); }
+  .health-banner-icon { width: 32px; height: 32px; border-radius: 50%; background: #000; color: var(--red); display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 900; flex-shrink: 0; }
+  .health-banner-text { flex: 1; }
+  .health-banner-title { font-weight: 800; font-size: 15px; letter-spacing: 0.5px; }
+  .health-banner-sub { font-weight: 500; font-size: 12px; margin-top: 2px; opacity: 0.85; }
+
   .beacon { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px; border-left: 6px solid var(--green); background: rgba(158,206,106,0.06); }
   .beacon.warn { border-left-color: var(--yellow); background: rgba(224,175,104,0.06); }
   .beacon.error { border-left-color: var(--red); background: rgba(247,118,142,0.06); }
@@ -781,6 +803,14 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 <!-- ============ STATUS TAB ============ -->
 <div id="view-status" class="view active">
+  <div id="health-banner" class="health-banner" style="display:none">
+    <div class="health-banner-icon">!</div>
+    <div class="health-banner-text">
+      <div class="health-banner-title">DISPATCHER DOWN</div>
+      <div class="health-banner-sub" id="health-banner-sub"></div>
+    </div>
+  </div>
+
   <div class="beacon" id="beacon">
     <div class="beacon-dot"></div>
     <div class="beacon-text">
@@ -997,17 +1027,29 @@ async function loadMoreLogs() {
 function renderStatus() {
   if (!state || state.error) return;
 
+  // Health banner (shown only when dispatcher is "down")
+  const banner = document.getElementById('health-banner');
+  const bannerSub = document.getElementById('health-banner-sub');
+  if (state.health?.state === 'down') {
+    banner.style.display = 'flex';
+    bannerSub.textContent = state.health.reason || 'dispatcher not producing successful commits';
+  } else {
+    banner.style.display = 'none';
+  }
+
   // Health beacon
   const beacon = document.getElementById('beacon');
   const bTitle = document.getElementById('beacon-title');
   const bSub = document.getElementById('beacon-sub');
   const recentErrors = (state.recent_logs || []).slice(0, 3).filter(l => l.outcome === 'error').length;
   const isPaused = state.paused || state.pause_file_exists;
+  const healthDown = state.health?.state === 'down';
   let level = 'ok';
   let title = 'Healthy';
   let sub = '';
 
-  if (recentErrors >= 2) { level = 'error'; title = 'Errors detected'; sub = recentErrors + ' errors in last 3 runs'; }
+  if (healthDown) { level = 'error'; title = 'Dispatcher down'; sub = state.health.reason; }
+  else if (recentErrors >= 2) { level = 'error'; title = 'Errors detected'; sub = recentErrors + ' errors in last 3 runs'; }
   else if (isPaused) { level = 'warn'; title = 'Paused'; sub = 'Dispatcher is paused'; }
   else if (state.budget && !state.budget.dispatch_authorized) { level = 'warn'; title = 'Budget gate blocking'; sub = state.budget.skip_reason || 'over pace'; }
   else if (state.budget?.dispatch_authorized) { sub = 'Claude authorized, dispatching when idle'; }

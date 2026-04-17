@@ -675,9 +675,27 @@ if ($Engine -eq 'node') {
     Show-DispatchToast -Outcome $NotifyOutcome -Engine $NotifyEngine -Duration $NotifyDuration
   }
 
+  # ---- Health summary (SYNTAX-2: visibility of "dispatcher down" state) ----
+  # Compute health.json from the JSONL log so cross-machine viewers see when
+  # the dispatcher has stopped producing successful commits.
+  $healthFile = Join-Path $RepoRoot 'status\health.json'
+  $healthScript = Join-Path $RepoRoot 'scripts\lib\health.mjs'
+  $logFile = Join-Path $RepoRoot 'status\budget-dispatch-log.jsonl'
+  if ((Test-Path $healthScript) -and (Test-Path $logFile)) {
+    try {
+      $healthOut = & node $healthScript $logFile $healthFile 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Write-Log "health.mjs exited ${LASTEXITCODE}: $healthOut" 'warn'
+      }
+    } catch {
+      Write-Log "health compute error: $_" 'warn'
+    }
+  }
+
   # ---- Gist status sync (runs on ALL exit paths, including errors) ----
-  # Push last-run status to a public GitHub Gist for cross-machine visibility.
-  # Moved to finally block so errors don't leave the gist stale.
+  # Push last-run status AND health summary to a public GitHub Gist for
+  # cross-machine visibility. Moved to finally block so errors don't leave
+  # the gist stale.
   $configFile = Join-Path $RepoRoot 'config\budget.json'
   $gistId = $null
   try {
@@ -695,6 +713,17 @@ if ($Engine -eq 'node') {
         }
       } catch {
         Write-Log "gist sync error: $_" 'warn'
+      }
+    }
+    # Health: -a handles both add (first time) and update (subsequent) idempotently.
+    if (Test-Path $healthFile) {
+      try {
+        & gh gist edit $gistId -a $healthFile *>$null
+        if ($LASTEXITCODE -ne 0) {
+          Write-Log "gist health sync failed (gh exit=$LASTEXITCODE)" 'warn'
+        }
+      } catch {
+        Write-Log "gist health sync error: $_" 'warn'
       }
     }
   }

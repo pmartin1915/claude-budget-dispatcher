@@ -529,7 +529,7 @@ function readFileSafe(filePath, maxChars) {
  * (returns finish_reason=STOP mid-function). Only checks code-like file extensions.
  *
  * Known limitations (all fail toward false-positive, which triggers retry — safe direction):
- * - Comments: braces inside // or /* */ are counted (false positive possible)
+ * - Comments: braces inside line or block comments are counted (false positive possible)
  * - Regex literals: /[{]/ braces are counted (false positive possible)
  * - Template expressions: `${expr}` — braces inside expressions are NOT counted
  *   (skipped as part of template string), so truncation mid-template-expression passes.
