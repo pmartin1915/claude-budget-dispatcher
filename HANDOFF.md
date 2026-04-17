@@ -1,6 +1,101 @@
-# Handoff -- Laptop Claude instance (Part 14 -- 2026-04-16)
+# Handoff -- Part 15 (2026-04-17) -- Hardening session
 
-> **READ THIS FIRST.** Part 14 supersedes all previous parts. Read the TL;DR, then "what was done" and "what's left".
+> **READ THIS FIRST.** Part 15 supersedes all previous parts. Every new instance should read the TL;DR, then "What the next instance MUST audit", then "Failure modes and their tells". Parts 13-14 are historical context below.
+
+## Part 15: TL;DR
+
+**The dispatcher broke for 23+ hours and nobody noticed. Fixed in this session.**
+
+Two independent bugs conspired:
+1. **worker.mjs:532 JSDoc typo** — a literal `*/` inside a `/** ... */` block closed the outer comment early, creating a parse error that broke every dispatch for 5+ hours until discovered. (Fixed.)
+2. **node_modules gitignored in worktrees** — `verify-commit.mjs` runs `npm test` in the worktree, which has no `node_modules` (gitignored). For audit tasks (docs-only output), this was pointless and caused every combo audit to revert for 18+ hours with the misleading reason "final-test-failure". (Fixed — tests now skip when all changes are docs-only.)
+
+**Four shipped fixes** (commits `24d2e88`, `23e63c2`):
+1. worker.mjs:532 JSDoc reworded to remove literal `*/`
+2. Pre-commit hook now runs `node --check` on every staged `.mjs` (extends existing R-6 .ps1 ASCII check)
+3. Dispatcher health signal: `scripts/lib/health.mjs` + red banner on dashboard + `health.json` synced to public Gist. Visible from any machine now.
+4. `verify-commit.mjs` skips `npm test` when all changed files are docs-only (md/mdx/txt/rst). Authoritative source: `getChangedFiles(worktreePath)`. Gate logic unit-tested across 9 cases including path-traversal attempt.
+
+**Current state (2026-04-17 17:33 UTC):**
+- Health: **healthy** (`gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json`)
+- Last success: 17:33 (combo, boardbound, shortless-ios all produced real commits in the last hour via `--force`-ed verification dispatches)
+- `dry_run: false`, auto engine, tray running, Ollama running, 11 projects in rotation
+- PC LAN IP: **192.168.1.105** (Optiplex can reach Ollama at `http://192.168.1.105:11434`)
+
+**All four fixes were audited by `mcp__pal__codereview` with `gemini-2.5-pro` before shipping.** That process caught: a critical secret-leak vector (test stderr in the public-synced log JSON return), an IFS shell bug (empty `nl` from command substitution), an over-narrow extension whitelist (inverted to docs-only blocklist), a PowerShell variable interpolation bug (`${LASTEXITCODE}:`), and a cache-miss perf concern (fixed with 60s TTL matching the existing pattern).
+
+## Part 15: What the next instance MUST audit
+
+Before touching any code, verify these invariants are still holding:
+
+1. **Health is being computed and synced.** `node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json` should print `health: healthy (ok)` (or report the specific reason for "down"). Then `gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json` should match.
+2. **Pre-commit hook is installed.** `ls -la .git/hooks/pre-commit` should exist and match `scripts/hooks/pre-commit` in content. If not: `cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`. On fresh clones this needs to happen manually.
+3. **`node --check scripts/**/*.mjs` passes.** Any syntax error here means the dispatcher will fail every run until fixed.
+4. **Fleet tab loads.** `http://localhost:7380` → Fleet tab → verify the 11 projects render with phase cells.
+5. **Last dispatch was real.** Check `status/budget-dispatch-last-run.json` timestamp. If it's stale (>1h when PC is in use, >4h when idle-eligible), something's wrong.
+6. **Auto branches are accumulating real commits.** `cd /c/Users/perry/DevProjects/combo && git branch --list 'auto/*' | wc -l` should grow over time. New entries should have commits on them (diff vs main non-empty), not be empty branches.
+
+## Part 15: Failure modes and their tells
+
+These are the ways the dispatcher has actually broken in production. The next instance should recognize them fast.
+
+| Failure | Tell | Root cause | Fix |
+|---|---|---|---|
+| Every dispatch fails immediately with exit 1 | `SyntaxError` in dispatch logs, 15+ consecutive errors | Syntax error in any .mjs file imported by `dispatch.mjs` | Pre-commit hook now blocks this. On legacy breakage: `node --check scripts/dispatch.mjs` to find the offending file, fix syntax. |
+| Every dispatch reverts with `final-test-failure` | Worktrees created but `git diff main..auto/*` is empty | Worktree has no `node_modules`, `npm test` fails | Fixed in verify-commit.mjs. If it recurs, check that the skip logic is still gating on docs-only. |
+| Dispatcher "works" but no commits appear | Log shows wrapper-success but no `outcome: success` entries | Something past phase 5 is silently eating results | Read recent entries in `status/dispatcher-runs/*.log` for the last "phase 5" run |
+| Dashboard shows "healthy" but nothing's happening | Health is based on LAST success, not absence of runs | If dispatcher can't even START (e.g., Task Scheduler disabled), no events hit the log | Check `Get-ScheduledTask BudgetDispatcher-Node` state via tray or powershell |
+| PS1 wrapper fails silently | `status/budget-dispatch-last-run.json` stale | Non-ASCII characters in a .ps1 file (R-6) OR invalid PowerShell variable interpolation (`$var:something` reads as drive scope) | Pre-commit hook R-6 catches non-ASCII. For interpolation: always use `${var}` when followed by `:` |
+| Reverts mask the real cause | JSONL log shows "final-test-failure" for everything | stderr from npm test was being discarded | Now `console.error`'d in verify-commit.mjs, goes to `status/dispatcher-runs/*.log`. Grep there first. |
+
+## Part 15: Guardrails -- be paranoid about these
+
+1. **Never run `rm -rf /c/Users/perry/DevProjects/auto-*`** without first confirming the dispatcher isn't currently running (it uses those paths for live worktrees). Check `Get-ScheduledTaskInfo BudgetDispatcher-Node` State first.
+2. **Never add `test_stderr` or `stdout` to the JSON returned from `verifyAndCommit`.** It flows through `log.mjs` into `budget-dispatch-log.jsonl`, which (though currently gitignored) has precedent for being synced. Test output can contain API keys, paths, PII. Log via `console.error` instead — it goes to `status/dispatcher-runs/*.log` which is local-only.
+3. **Be careful modifying `verify-commit.mjs`, `dispatch.mjs`, `worker.mjs`, `provider.mjs`, `router.mjs`, `throttle.mjs`.** These are hot-path files. A syntax error or semantic regression takes the whole system down. The pre-commit hook catches syntax but NOT semantics. Always audit with `mcp__pal__codereview` before committing changes to these files.
+4. **PowerShell + `:` after a variable name** is a drive-scope reference unless you use `${var}:`. Common bug in `run-dispatcher.ps1`.
+5. **Shell `$(printf '\n')` returns empty** because command substitution strips trailing newlines. For a literal newline in POSIX sh, use a quoted literal:  
+   ```sh
+   nl='
+   '
+   ```
+6. **`/* */` inside a `/** ... */` JSDoc block** is always a parse error. The middle `*/` closes the outer comment. Use "line or block comments" in prose instead.
+7. **Worktrees don't share `node_modules`.** Anything that runs `npm test` or similar in a worktree needs either: a skip condition (current solution), or a bootstrap step (junction to main, or `npm ci`). Don't quietly add another such command without thinking about this.
+8. **Gist sync is idempotent via `gh gist edit -a <file>`.** Do NOT use positional `gh gist edit <id> <file>` — when the gist has multiple files, it errors with "unsure what file to edit".
+
+## Part 15: Open questions for the next instance
+
+- **Greenfield projects still haven't been dispatched.** 5 sandboxes (biz-app, game-adventure, dnd-game, sand-physics, worldbuilder) were scaffolded in Part 13 but none have had a successful dispatch yet. With the verify-commit fix, they should start getting picked up — but only once the selector rotates to them. Monitor overnight to confirm.
+- **boardbound's 2 date-sensitive test failures.** Now that `npm test` is correctly gated, audits on boardbound succeed. But `tests-gen`, `refactor`, `fix` still run the full suite, which will fail. Separate fix needed: either repair the tests or filter them out of the suite that runs during verify.
+- **Secret gist URL is in the repo.** `config/budget.json` has `status_gist_id: 655d02ce43b293cacdf333a301b63bbf`. The gist is public-readable (no secret), but anyone with the ID can see dispatch state and (future) health info. Not a credential leak, but worth noting if you grow to include more sensitive data.
+- **Separate API keys per machine.** Perry plans to use distinct Gemini/Mistral/Groq keys on the Optiplex for rate-limit isolation and blast-radius containment. The dispatcher reads from environment variables; no code change needed, just a different `[Environment]::SetEnvironmentVariable(...)` on each machine.
+- **Cross-machine status board (Issue #1).** `scripts/status.mjs` was shipped in Part 14 (laptop) but no instance has actually used it yet. Next instance should consider wiring check-in/check-out into dispatch.mjs startup so we have a record of which machine ran which dispatch.
+
+## Part 15: Quick ops reference
+
+```bash
+# Force a dispatch to test changes
+node scripts/dispatch.mjs --force --dry-run    # inspect, no commit
+node scripts/dispatch.mjs --force              # real dispatch
+
+# Check health
+node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json
+
+# View remote health from any machine
+gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json
+
+# Restart dashboard
+powershell -Command "Get-NetTCPConnection -LocalPort 7380 -State Listen | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force }; Start-Sleep 1; Start-Process node -ArgumentList 'scripts/dashboard.mjs' -WorkingDirectory 'c:\Users\perry\DevProjects\claude-budget-dispatcher' -WindowStyle Hidden"
+
+# Install pre-commit hook (first-time setup on new clones)
+cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
+---
+
+# Handoff -- Laptop Claude instance (Part 14 -- 2026-04-16) -- superseded by Part 15
+
+> Historical. Part 15 supersedes this section; read it first. Kept below for continuity.
 
 ## Part 14: TL;DR for next instance
 
