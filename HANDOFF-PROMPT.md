@@ -1,48 +1,66 @@
 # Handoff Prompt
 
-Paste this into the next Claude Code session:
+Paste this into the next Claude Code session (laptop or any machine):
 
 ~~~
 Resume claude-budget-dispatcher.
 
 ## Required reading (in order)
 
-1. HANDOFF.md -- Part 17 first (TL;DR + state check), then Part 16 (open questions), then Part 15 (invariant protocol, failure-modes table, guardrails).
-2. git log --oneline -10
+1. HANDOFF.md -- Part 18 first (fleet.json shipped, current state), then Part 16 (open questions 1-2 -- Q3 is now done), then Part 15 (invariant protocol, failure-modes table, guardrails).
+2. git log --oneline -10  -- expect `2af0429 feat: fleet.json per-machine gist sync` on top.
 3. status/health.json  (or `gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json` from any machine)
+4. Cross-machine view: `gh gist view 655d02ce43b293cacdf333a301b63bbf` -- expect at least `health.json`, `budget-dispatch-last-run.json`, and one or more `fleet-<hostname>.json` files.
 
-## Before touching code: run the 6 invariants from Part 15
+## If this is a FRESH machine (first time running Part 18 code)
 
-1. node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json  → expect "healthy (ok)"
-2. Pre-commit hook installed: `diff scripts/hooks/pre-commit .git/hooks/pre-commit`  → empty
-3. `node --check` on every .mjs under scripts/  (pre-commit hook does this; verify manually on cold clones)
-4. Dashboard loads: http://localhost:7380 → Fleet tab renders 11 projects
+Run the Part 18 second-machine first-run checklist BEFORE anything else:
+
+1. `git pull` -- must include commit `2af0429`. If not, Perry hasn't pushed yet; stop and flag it.
+2. Install pre-commit hook if missing: `cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
+3. Trigger one wrapper run (user-active skip is fine): `powershell -File scripts/run-dispatcher.ps1 -RepoRoot "$(pwd)" -Engine node`
+4. Verify `status/fleet-<thishostname>.json` was created locally.
+5. Verify remote: `gh gist view 655d02ce43b293cacdf333a301b63bbf` lists `fleet-<thishostname>.json`.
+6. Pollution canary: `grep -c '^\[' status/budget-dispatch-log.jsonl` MUST be 10.
+
+If step 4 produces `fleet-unknown.json`, COMPUTERNAME was unset. Unusual on Windows -- investigate. If step 5 fails with `unsure what file to edit`, Part 16 Bug A is recurring -- STOP and investigate before doing anything else.
+
+## Before touching code: run the 7 invariants (Part 15 + Part 18 additions)
+
+1. node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json  -> expect "healthy (ok)"
+2. Pre-commit hook installed: `diff scripts/hooks/pre-commit .git/hooks/pre-commit`  -> empty
+3. `node --check` on every .mjs under scripts/  (includes the NEW scripts/lib/fleet.mjs)
+4. Dashboard loads: http://localhost:7380 -> Fleet tab renders 11 projects
 5. status/budget-dispatch-last-run.json fresh (<1h if user-active window, <4h if idle-eligible)
-6. `cd ../combo && git branch --list 'auto/*' | wc -l`  → should grow over time (was 15 at Part 17 write)
+6. `cd ../combo && git branch --list 'auto/*' | wc -l`  -- should grow over time (was 15 at Part 17/18 write)
+7. NEW: `ls status/fleet-*.json` -- at least this machine's file present, schema parseable (keys: machine, last_run_*, last_dispatch_*, computed_at)
 
-## Pollution canary (added in Part 17)
+## Pollution canary (unchanged from Part 17)
 
-`grep -c '^\[' status/budget-dispatch-log.jsonl`  → should be **10** and stay 10 forever.
-If it grows: new run-dispatcher.ps1 case-collision or another Write-Log path bleeding into JSONL. See Part 16 Bug B.
+`grep -c '^\[' status/budget-dispatch-log.jsonl`  -> MUST be **10** and stay 10 forever.
+If it grows: new run-dispatcher.ps1 case-collision or another Write-Log path bleeding into JSONL. Part 18 added a fleet block to the finally -- double-check nothing new there is misrouted. See Part 16 Bug B, Part 18 guardrails.
 
-## Open questions -- pick one and run (full detail in HANDOFF.md Part 16)
+## Open questions -- pick one and run (Q3 shipped in Part 18; full detail in HANDOFF.md Part 16)
 
-1. **Greenfield sandboxes have never been dispatched** (5 projects, zero auto/* branches). Recommended path: wait 24h → trace selector → soft STATE.md bias → hard `never_dispatched_bonus`. Start with observation, not code.
-2. **boardbound date-sensitive vitest failures** block non-audit dispatches. Recommended: surgical `vi.useFakeTimers()` fix in the boardbound repo, not the dispatcher.
-3. **Cross-machine status board**: build the lighter-touch `fleet.json` gist-sync (~4 lines in run-dispatcher.ps1 mirroring the health.json flow). Do NOT wire scripts/status.mjs into dispatch.mjs -- 144 comments/day flood risk.
+1. **Greenfield sandboxes have never been dispatched** (5 projects, zero auto/* branches). Recommended path: wait 24h -> trace selector -> soft STATE.md bias -> hard `never_dispatched_bonus`. Start with observation, not code. If 48h+ have passed since Part 17 with still-zero sandbox entries in `tail -200 status/budget-dispatch-log.jsonl | grep project`, graduate to the selector-trace step.
+
+2. **boardbound date-sensitive vitest failures** block non-audit dispatches. Recommended: surgical `vi.useFakeTimers()` fix in the boardbound repo, not the dispatcher. If boardbound shows `outcome:"reverted"` entries for tests-gen/refactor/fix (not audit), this is the culprit.
+
+3. **Cross-machine status board** -- SHIPPED in Part 18. Verify fleet-*.json files exist for each machine that has run the wrapper. Future polish (out of scope this weekend): wire `dashboard.mjs` to read fleet-*.json and display a "machine last-active" column on the Fleet tab.
 
 ## Audit discipline -- MANDATORY on hot-path files
 
-Hot-path = dispatch.mjs, worker.mjs, verify-commit.mjs, provider.mjs, router.mjs, throttle.mjs, selector.mjs, context.mjs, run-dispatcher.ps1, scripts/lib/health.mjs.
+Hot-path (Part 18 expanded list): dispatch.mjs, worker.mjs, verify-commit.mjs, provider.mjs, router.mjs, throttle.mjs, selector.mjs, context.mjs, run-dispatcher.ps1, scripts/lib/health.mjs, **scripts/lib/fleet.mjs**.
 
 Before any commit that touches hot-path:
   mcp__pal__codereview  with  model: "gemini-2.5-pro"
 Fallback: review_validation_type: "internal" if Gemini 503s.
-Zero findings is not a waste -- it confirms the change is minimal.
+
+**Note from Part 18:** Gemini can overstate severity. The Part 18 review flagged a HIGH on CRLF parsing that turned out to be empirically not a correctness bug (JSON.parse treats \r as whitespace per ECMA-404). Apply findings, but verify claims empirically when you have the data. "HIGH" in Gemini's output is not a trump card -- cross-check against the actual runtime behavior.
 
 Docs-only changes (HANDOFF.md, README, config comments) do NOT need codereview.
 
-## Suggested workflow (Opus <-> Sonnet swap, Part 17)
+## Suggested workflow (Opus <-> Sonnet swap, Part 17/18)
 
 - **Opus 4.7 (1M ctx)** = planning + audit. Use for: understanding invariants, tracing bugs, writing handoffs, orchestrating mcp__pal__codereview, judging hot-path risk. Default to Plan mode on any change touching hot-path.
 - **Sonnet 4.6** = implementation once a plan is approved. Switch to it after ExitPlanMode for the mechanical edit phase; switch back to Opus for the pre-commit review pass.
@@ -67,4 +85,23 @@ Docs-only changes (HANDOFF.md, README, config comments) do NOT need codereview.
 - put test stderr into any JSON that flows to `budget-dispatch-log.jsonl` (Part 15 guardrail #2 -- that file is gist-sync candidate)
 - commit hot-path code without `mcp__pal__codereview` gemini-2.5-pro
 - push the handoff commit without Perry's "say the word"
+- rename or relocate `scripts/lib/fleet.mjs` (Part 18 -- `run-dispatcher.ps1` references it by that exact path)
+- write a single merged `fleet.json` across machines (Part 18 -- the per-file race-free model is deliberate)
+- rename the `fleet-<hostname>.json` pattern without also manually cleaning up stale files in the gist
 ~~~
+
+## Pre-departure checklist for Perry (run BEFORE leaving)
+
+The laptop instance needs these to be true when it comes online this weekend:
+
+1. **Push main.** The Part 18 fleet.json commit (`2af0429`) is on main locally but NOT on origin. The laptop can't use fleet.json until it pulls this.
+   ```bash
+   git push
+   ```
+2. **Bootstrap wilderness' fleet file.** One wrapper invocation (idle window is easiest -- don't force it) creates `fleet-wilderness.json` in the gist. If you want to verify before leaving:
+   ```bash
+   gh gist view 655d02ce43b293cacdf333a301b63bbf
+   # Should list fleet-wilderness.json after the next scheduled dispatch at XX:12 / XX:32 / XX:52.
+   ```
+3. **Sanity-check health on both machines' current state.** Dashboard at `localhost:7380` shows local; gist shows remote.
+4. **Optional: fire a -ForceBudget dispatch on wilderness to seed auto/* branch growth.** Part 17 showed combo auto/* stuck at 15 because user-active has been suppressing real runs. One forced dispatch during the idle window gives the laptop instance a recent data point to analyze.

@@ -1,3 +1,118 @@
+# Handoff -- Part 18 (2026-04-17 21:20 UTC) -- Fleet.json gist sync shipped
+
+> **READ THIS FIRST.** Part 18 supersedes Parts 15-17 for current state. This session shipped Open Question 3 (cross-machine fleet.json gist sync) in commit `2af0429`. Parts 15-17 below remain authoritative for invariants, failure modes, and open questions 1-2.
+
+## Part 18: TL;DR
+
+- **Shipped:** Per-machine `fleet-<hostname>.json` snapshot synced to the status gist on every wrapper run. Four files touched: new `scripts/lib/fleet.mjs`, ~34 lines in `scripts/run-dispatcher.ps1` finally block, `.gitignore`, plus a CRLF hardening in `scripts/lib/health.mjs`.
+- **Why this, not `status.mjs`:** Part 16 flagged wiring `status.mjs` into `dispatch.mjs` as a 144-comments/day flood risk on Issue #1. The fleet.json approach is the "lighter touch" alternative it recommended — no issue noise, no gh API rate pressure, visible from any machine via `gh gist view 655d02ce43b293cacdf333a301b63bbf -f fleet-<hostname>.json`.
+- **Audit discipline held.** Gemini 2.5-pro codereview returned one HIGH-flagged finding (CRLF split) that turned out to be empirically NOT a correctness bug (JSON.parse treats `\r` as whitespace per ECMA-404, and all 752 real JSON lines parse fine). I applied the `/\r?\n/` change anyway as defensive hardening — removes a latent dependency on JSON.parse's whitespace tolerance. One LOW finding (COMPUTERNAME null-guard) fixed mid-review. Severity disagreement documented here so a future instance doesn't over-react if Gemini flags the same pattern.
+- **Open questions 1 and 2 remain open.** Q1 (greenfield sandboxes zero dispatches) unchanged since Part 16. Q2 (boardbound date-sensitive tests) unchanged.
+
+## Part 18: State check (2026-04-17 21:20 UTC)
+
+| Check | Result |
+|---|---|
+| Local health | `healthy (ok)`, last success 19:13Z wilderness, consecutive_errors=0, hours_since_success ~2.0h |
+| JSONL pollution canary | **10** (Part 16 Bug B fix still holding) |
+| Pre-commit hook | matches `scripts/hooks/pre-commit` |
+| `node --check` all .mjs | clean (including new fleet.mjs) |
+| Dashboard | 200 OK, 11 projects in Fleet tab |
+| combo auto/* branches | 15 (unchanged from Part 17 — user-active window has been suppressing real dispatches) |
+| Git log | `2af0429` on top of `bfe8e17`, NOT pushed yet |
+
+## Part 18: What shipped (commit 2af0429)
+
+### scripts/lib/fleet.mjs (NEW)
+
+Mirrors the proven [scripts/lib/health.mjs](scripts/lib/health.mjs) CLI pattern. `computeFleet(logPath, machineName)` reads the JSONL log and returns two pairs of "last" fields:
+
+- `last_run_*` (ts / outcome / engine / wrapper_duration_sec) — most recent JSONL entry, any outcome. Shows "is this machine alive, when did it last check in."
+- `last_dispatch_*` (project / task / outcome / ts) — most recent entry with `outcome === "success"` AND a populated `project`. Shows "last time this machine actually committed code."
+
+The separation matters: a machine that's been skipping user-active all day is idle, not dead. A merged single-field-set would hide that distinction.
+
+CLI: `node scripts/lib/fleet.mjs <logPath> <outPath> [machineName]`. Hostname defaults to `os.hostname().toLowerCase()`; explicit override supported for DESKTOP-XXXX collision cases.
+
+### scripts/run-dispatcher.ps1 (edited — hot-path)
+
+Inserted a fleet-compute-then-gist-sync block in the `finally` at lines ~733-763, immediately after the existing health gist sync. Pattern is line-for-line parallel to the health.json flow already there since Part 15.
+
+Key guardrails applied — each one a pattern a reviewer should check on any future hot-path edit:
+- No case-collision: new locals (`$fleetScript`, `$machineName`, `$fleetFile`, `$fleetOut`) don't case-match any script-scope var. Part 16 Bug B.
+- `gh gist edit $gistId -a $fleetFile`: always `-a`, never positional. Part 16 Bug A.
+- Write-Log routes to per-run `.log` only. JSONL pollution canary holds at 10.
+- `${LASTEXITCODE}` uses `${var}` form. Part 15 guardrail #4.
+- PS1 stays pure ASCII. R-6.
+- `$env:COMPUTERNAME` null-guarded — `if ($env:COMPUTERNAME) { ... } else { 'unknown' }`. Would propagate out of the finally if it threw, masking the dispatcher's real outcome and skipping mutex release.
+
+### scripts/lib/health.mjs (edited — hot-path, defensive)
+
+`parseLines` now splits on `/\r?\n/` instead of `"\n"`. Behavior on the current log is identical (verified: only `computed_at` and `hours_since_success` time-driven fields differ between pre- and post-fix output). See Part 18 TL;DR for the severity disagreement with Gemini.
+
+### .gitignore (one line)
+
+Added `status/fleet-*.json` under the runtime-state block.
+
+## Part 18: New invariant -- fleet.json canary
+
+Add these to the cold-start checklist:
+
+```bash
+# After the first successful wrapper run on a new machine, a fleet-<hostname>.json must appear.
+ls status/fleet-*.json
+# Expected: one file per machine that has run the wrapper since Part 18 shipped.
+
+# The file must parse and have the expected shape:
+node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync('status/fleet-$(hostname).json','utf8')), null, 2))"
+# Expected keys: machine, last_run_*, last_dispatch_*, computed_at
+
+# Cross-machine view:
+gh gist view 655d02ce43b293cacdf333a301b63bbf
+# Expected: health.json, budget-dispatch-last-run.json, fleet-<hostname>.json for each machine.
+```
+
+**Failure mode:** If a machine runs the wrapper (verified via updated `budget-dispatch-last-run.json` ts) but no fleet file appears, check the per-run .log for `fleet.mjs exited` or `fleet compute error` warnings. Most likely cause: COMPUTERNAME unset (guard falls back to `fleet-unknown.json`) or fleet.mjs syntax regression (pre-commit hook should have caught this).
+
+## Part 18: Expanded hot-path list
+
+Add `scripts/lib/fleet.mjs` to the Part 15/17 hot-path enumeration. Full list for reference:
+
+`dispatch.mjs`, `worker.mjs`, `verify-commit.mjs`, `provider.mjs`, `router.mjs`, `throttle.mjs`, `selector.mjs`, `context.mjs`, `run-dispatcher.ps1`, `scripts/lib/health.mjs`, **`scripts/lib/fleet.mjs`**.
+
+Any change to these files MUST pass `mcp__pal__codereview` with `gemini-2.5-pro` before commit.
+
+## Part 18: Second-machine first-run checklist
+
+First time Part 18 code runs on a new machine (e.g. laptop, Optiplex) — verify this sequence:
+
+1. `git pull` → must include commit `2af0429` (`feat: fleet.json per-machine gist sync + harden parseLines CRLF`).
+2. Pre-commit hook install: `cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
+3. Trigger one wrapper run (user-active window is fine — skip still writes fleet snapshot): `powershell -File scripts/run-dispatcher.ps1 -RepoRoot "$(pwd)" -Engine node`.
+4. Verify local file: `ls status/fleet-*.json` — should see one file for this hostname.
+5. Verify remote: `gh gist view 655d02ce43b293cacdf333a301b63bbf` should list `fleet-<thishostname>.json`.
+6. Canary: `grep -c '^\[' status/budget-dispatch-log.jsonl` — MUST still be 10 (not 11+).
+
+If step 4 produces `fleet-unknown.json`, COMPUTERNAME was unset. Investigate the environment (it's always set under Windows in practice; Task Scheduler inherits it). If step 5 fails with `unsure what file to edit`, that's Part 16 Bug A recurring — the code should use `-a`, not positional.
+
+## Part 18: Open questions -- current state
+
+Q3 shipped. Q1 and Q2 remain open exactly as described in [Part 16 Q1-Q2 section below](#part-16-open-questions----state-and-recommended-approach).
+
+1. **Greenfield sandboxes still at zero auto/* branches.** User-active skips have dominated the rotation since Part 17. Recommended path per Part 16: wait 24h → trace selector → soft STATE.md bias → hard `never_dispatched_bonus`. Starting point is observation, not code.
+2. **boardbound date-sensitive vitest failures** unaddressed. Audits succeed; `tests-gen`/`refactor`/`fix` will still revert. Recommended: surgical `vi.useFakeTimers()` fix in the boardbound repo, not the dispatcher.
+
+## Part 18: Things NOT to do
+
+All Parts 14-17 restrictions still apply. Additions from this session:
+
+- Do not rename or relocate `scripts/lib/fleet.mjs` — `run-dispatcher.ps1` looks for it at that exact path.
+- Do not change the `fleet-<hostname>.json` naming scheme without also updating the gist manually — old files would persist as orphaned entries until deleted.
+- Do not write a single merged `fleet.json` across machines — the per-file race-free model is deliberate. Part 18 TL;DR explains why.
+- Do not push `2af0429` to origin without Perry's say-so.
+
+---
+
 # Handoff -- Part 17 (2026-04-17 20:35 UTC) -- Audit checkpoint + Opus/Sonnet workflow
 
 > **READ THIS FIRST.** Part 17 supersedes Part 16 for current state. No code changed this session. Part 17 is an audit checkpoint confirming Part 16's fixes are holding 1h+ post-ship, a refreshed `HANDOFF-PROMPT.md`, and a codified Opus/Sonnet + PAL MCP workflow. Read Part 16 below for the three open questions; read Part 15 below that for the invariant protocol and guardrails -- both still authoritative.
