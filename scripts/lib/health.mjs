@@ -17,7 +17,10 @@ const DOWN_ERROR_STREAK = 3;
 const DOWN_HOURS_WITHOUT_SUCCESS = 6;
 
 function parseLines(raw) {
-  return raw.trim().split("\n").filter(Boolean).map((l) => {
+  // Split on LF or CRLF. PowerShell's Add-Content writes CRLF on Windows;
+  // JSON.parse tolerates a trailing \r as whitespace (ECMA-404) so the old
+  // `split("\n")` worked, but splitting on /\r?\n/ removes that dependency.
+  return raw.trim().split(/\r?\n/).filter(Boolean).map((l) => {
     try { return JSON.parse(l); } catch { return null; }
   }).filter(Boolean);
 }

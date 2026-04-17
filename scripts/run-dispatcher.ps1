@@ -729,6 +729,41 @@ if ($Engine -eq 'node') {
       }
     }
   }
+
+  # ---- Fleet snapshot sync (per-machine last-dispatch state) ----
+  # Cross-machine visibility: each machine owns its own fleet-<hostname>.json
+  # in the shared gist. Per-machine filenames avoid a merge race that a single
+  # fleet.json would hit when two machines write concurrently. Follows the
+  # health.json compute-then-sync pattern above.
+  # Reuse script-scope $DispatcherLog (line 88). Do NOT redeclare locals that
+  # case-collide with $LogFile or $DispatcherLog -- PowerShell variables are
+  # case-insensitive and a collision silently retargets Write-Log.
+  $fleetScript = Join-Path $RepoRoot 'scripts\lib\fleet.mjs'
+  # COMPUTERNAME is always set on Windows but guard anyway -- a null-method call
+  # here would throw inside `finally` and mask the original outcome.
+  $machineName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME.ToLowerInvariant() } else { 'unknown' }
+  $fleetFile = Join-Path $RepoRoot "status\fleet-$machineName.json"
+  if ((Test-Path $fleetScript) -and (Test-Path $DispatcherLog)) {
+    try {
+      $fleetOut = & node $fleetScript $DispatcherLog $fleetFile $machineName 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        Write-Log "fleet.mjs exited ${LASTEXITCODE}: $fleetOut" 'warn'
+      }
+    } catch {
+      Write-Log "fleet compute error: $_" 'warn'
+    }
+  }
+  if ($gistId -and (Test-Path $fleetFile)) {
+    try {
+      & gh gist edit $gistId -a $fleetFile *>$null
+      if ($LASTEXITCODE -ne 0) {
+        Write-Log "gist fleet sync failed (gh exit=$LASTEXITCODE)" 'warn'
+      }
+    } catch {
+      Write-Log "gist fleet sync error: $_" 'warn'
+    }
+  }
+
   # Release named mutex (R-3). Kernel auto-releases on process death but
   # an explicit release lets a rapid-succession re-run avoid the abandoned-
   # mutex warning path. ReleaseMutex must run on the owning thread;
