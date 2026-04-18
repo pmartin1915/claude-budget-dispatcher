@@ -9,7 +9,7 @@
     "check-idle": "node scripts/check-idle.mjs",
     "dashboard": "node scripts/dashboard.mjs",
     "control": "node scripts/control.mjs",
-    "test": "node --test scripts/lib/__tests__/",
+    "test": "node --test scripts/lib/__tests__/*.test.mjs",
     "status": "node scripts/status.mjs"
   },
   "dependencies": {
