@@ -13,6 +13,7 @@ import { spawn, exec, execFileSync } from "node:child_process";
 
 import { resolveModel } from "./lib/router.mjs";
 import { computeHealth } from "./lib/health.mjs";
+import { createCachedFn } from "./lib/cache.mjs";
 import { getSafeTestEnv } from "./lib/worker.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -142,7 +143,7 @@ function getState() {
     recent_logs: recentLogs,
     projects: (config.projects_in_rotation ?? []).map((p) => p.slug),
     max_runs_per_day: snapshot?.weekly?.effective_max_runs_per_day ?? config.max_runs_per_day ?? 8,
-    today_runs: countTodayRuns(),
+    today_runs: cachedTodayRuns.get(),
     activity_gate: config.activity_gate ?? {},
     scheduled_task: getScheduledTaskInfo(),
     health: getCachedHealth(),
@@ -348,6 +349,13 @@ function getAnalytics() {
   };
 }
 
+// C1.1: Cached wrappers to avoid re-reading the entire JSONL log on every poll.
+const cachedAnalytics = createCachedFn(getAnalytics, 60_000);       // 1 min
+const cachedPredict = createCachedFn(predict, 30_000);               // 30s
+const cachedTodayRuns = createCachedFn(countTodayRuns, 30_000);      // 30s
+const cachedBudgetDetail = createCachedFn(getBudgetDetail, 30_000);  // 30s
+const cachedProjects = createCachedFn(getProjects, 30_000);          // 30s
+
 // ---- API: Budget Detail ----
 
 function getBudgetDetail() {
@@ -382,7 +390,7 @@ function getBudgetDetail() {
     monthly: config?.monthly ?? {},
     weekly_config: config?.weekly ?? {},
     token_weights: config?.token_weights ?? {},
-    today_runs: countTodayRuns(),
+    today_runs: cachedTodayRuns.get(),
     max_runs_per_day: snapshot?.weekly?.effective_max_runs_per_day ?? config?.max_runs_per_day ?? 8,
   };
 }
@@ -687,10 +695,10 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/state") { json(res, getState()); return; }
-  if (req.method === "GET" && url.pathname === "/api/predict") { json(res, predict()); return; }
-  if (req.method === "GET" && url.pathname === "/api/budget-detail") { json(res, getBudgetDetail()); return; }
-  if (req.method === "GET" && url.pathname === "/api/analytics") { json(res, getAnalytics()); return; }
-  if (req.method === "GET" && url.pathname === "/api/projects") { json(res, getProjects()); return; }
+  if (req.method === "GET" && url.pathname === "/api/predict") { json(res, cachedPredict.get()); return; }
+  if (req.method === "GET" && url.pathname === "/api/budget-detail") { json(res, cachedBudgetDetail.get()); return; }
+  if (req.method === "GET" && url.pathname === "/api/analytics") { json(res, cachedAnalytics.get()); return; }
+  if (req.method === "GET" && url.pathname === "/api/projects") { json(res, cachedProjects.get()); return; }
   if (req.method === "GET" && url.pathname === "/api/logs") {
     const offset = parseInt(url.searchParams.get("offset") || "0", 10);
     const limit = parseInt(url.searchParams.get("limit") || "20", 10);
