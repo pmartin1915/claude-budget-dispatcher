@@ -264,6 +264,89 @@ function getRunLog(file) {
   try { return { content: readFileSync(filePath, "utf8") }; } catch { return { error: "read error" }; }
 }
 
+// ---- API: Analytics ----
+
+function getAnalytics() {
+  const allLines = readLogLines();
+  const entries = allLines.map(parseLogLine).filter(Boolean);
+
+  // -- Outcome totals --
+  const outcomes = {};
+  for (const e of entries) {
+    outcomes[e.outcome] = (outcomes[e.outcome] || 0) + 1;
+  }
+
+  // -- Skip reason breakdown --
+  const skipReasons = {};
+  for (const e of entries) {
+    if (e.outcome === "skipped" && e.reason) {
+      skipReasons[e.reason] = (skipReasons[e.reason] || 0) + 1;
+    }
+  }
+
+  // -- 14-day daily breakdown (outcomes stacked) --
+  const now = new Date();
+  const daily = [];
+  for (let d = 13; d >= 0; d--) {
+    const date = new Date(now);
+    date.setDate(date.getDate() - d);
+    const prefix = date.toISOString().slice(0, 10);
+    const day = { date: prefix, success: 0, error: 0, skipped: 0, "dry-run": 0, other: 0 };
+    for (const e of entries) {
+      if (!e.ts?.startsWith(prefix)) continue;
+      if (day[e.outcome] !== undefined) day[e.outcome]++;
+      else day.other++;
+    }
+    daily.push(day);
+  }
+
+  // -- Hourly heatmap (0-23h, all time) --
+  const hourly = new Array(24).fill(0);
+  const hourlySkips = new Array(24).fill(0);
+  for (const e of entries) {
+    if (!e.ts) continue;
+    const h = new Date(e.ts).getHours();
+    if (e.outcome === "skipped") hourlySkips[h]++;
+    else hourly[h]++;
+  }
+
+  // -- Per-project stats --
+  const projectStats = {};
+  for (const e of entries) {
+    if (!e.project) continue;
+    if (!projectStats[e.project]) projectStats[e.project] = { total: 0, success: 0, error: 0, skipped: 0, tasks: {} };
+    const ps = projectStats[e.project];
+    ps.total++;
+    if (e.outcome === "success") ps.success++;
+    else if (e.outcome === "error") ps.error++;
+    else if (e.outcome === "skipped") ps.skipped++;
+    if (e.task) ps.tasks[e.task] = (ps.tasks[e.task] || 0) + 1;
+  }
+
+  // -- Per-model stats (which models were used) --
+  const modelStats = {};
+  for (const e of entries) {
+    const model = e.modelUsed || e.delegate_to;
+    if (!model) continue;
+    if (!modelStats[model]) modelStats[model] = { total: 0, success: 0, error: 0 };
+    modelStats[model].total++;
+    if (e.outcome === "success") modelStats[model].success++;
+    else if (e.outcome === "error") modelStats[model].error++;
+  }
+
+  return {
+    total_entries: entries.length,
+    first_entry: entries[0]?.ts || null,
+    last_entry: entries[entries.length - 1]?.ts || null,
+    outcomes,
+    skip_reasons: skipReasons,
+    daily,
+    hourly: hourly.map((dispatches, h) => ({ hour: h, dispatches, skips: hourlySkips[h] })),
+    project_stats: projectStats,
+    model_stats: modelStats,
+  };
+}
+
 // ---- API: Budget Detail ----
 
 function getBudgetDetail() {
@@ -572,6 +655,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/api/state") { json(res, getState()); return; }
   if (req.method === "GET" && url.pathname === "/api/predict") { json(res, predict()); return; }
   if (req.method === "GET" && url.pathname === "/api/budget-detail") { json(res, getBudgetDetail()); return; }
+  if (req.method === "GET" && url.pathname === "/api/analytics") { json(res, getAnalytics()); return; }
   if (req.method === "GET" && url.pathname === "/api/projects") { json(res, getProjects()); return; }
   if (req.method === "GET" && url.pathname === "/api/logs") {
     const offset = parseInt(url.searchParams.get("offset") || "0", 10);
@@ -767,6 +851,31 @@ const HTML_PAGE = `<!DOCTYPE html>
   .spark-labels { display: flex; gap: 2px; font-size: 9px; color: var(--text-dim); }
   .spark-labels span { flex: 1; text-align: center; }
 
+  /* Analytics */
+  .ana-big { font-size: 28px; font-weight: 800; line-height: 1.1; }
+  .ana-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .ana-bar-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .ana-bar-label { width: 200px; font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+  .ana-bar-track { flex: 1; height: 16px; background: var(--surface2); border-radius: 3px; overflow: hidden; display: flex; }
+  .ana-bar-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+  .ana-bar-count { width: 80px; text-align: right; font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+  .ana-stacked { display: flex; gap: 3px; align-items: flex-end; padding: 4px 0; }
+  .ana-stack-col { flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; }
+  .ana-stack-bars { display: flex; flex-direction: column-reverse; gap: 1px; width: 100%; }
+  .ana-stack-label { font-size: 9px; color: var(--text-dim); margin-top: 4px; }
+  .ana-stack-label.today { color: var(--cyan); font-weight: 700; }
+  .ana-stack-count { font-size: 9px; color: var(--text-dim); }
+  .ana-legend { display: flex; gap: 16px; font-size: 10px; color: var(--text-dim); margin-top: 8px; flex-wrap: wrap; }
+  .ana-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .ana-heatmap { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; }
+  @media (max-width: 700px) { .ana-heatmap { grid-template-columns: repeat(8, 1fr); } }
+  .ana-heat-cell { border-radius: 4px; padding: 6px 2px; text-align: center; min-height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .ana-heat-hour { font-size: 10px; color: var(--text-dim); font-weight: 600; }
+  .ana-heat-count { font-size: 12px; font-weight: 700; }
+  .ana-proj-tasks { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 0 6px 208px; }
+  .ana-task-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--surface2); color: var(--text-dim); }
+  .ana-task-tag b { color: var(--text); }
+
   /* Filters */
   .filters { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
   .filters select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 11px; }
@@ -846,6 +955,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 <div class="tabs">
   <button class="active" onclick="setTab('status')">Status</button>
+  <button onclick="setTab('analytics')">Analytics</button>
   <button onclick="setTab('budget')">Budget</button>
   <button onclick="setTab('projects')">Projects</button>
   <button onclick="setTab('logs')">Logs</button>
@@ -929,6 +1039,11 @@ const HTML_PAGE = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ============ ANALYTICS TAB ============ -->
+<div id="view-analytics" class="view">
+  <div id="analytics-content">Loading...</div>
+</div>
+
 <!-- ============ BUDGET TAB ============ -->
 <div id="view-budget" class="view">
   <div id="budget-detail">Loading...</div>
@@ -991,7 +1106,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 <script>
 // ---- State ----
-let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null, fleetData = null, fleetRemote = null;
+let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null, fleetData = null, fleetRemote = null, analyticsData = null;
 let logEntries = [], logOffset = 0, logTotal = 0;
 let currentTab = localStorage.getItem('dash-tab') || 'status';
 let refreshTimer = null;
@@ -1002,7 +1117,7 @@ function setTab(name) {
   currentTab = name;
   localStorage.setItem('dash-tab', name);
   document.querySelectorAll('.tabs button').forEach((b, i) => {
-    const tabs = ['status','budget','projects','logs','config','fleet','about'];
+    const tabs = ['status','analytics','budget','projects','logs','config','fleet','about'];
     b.classList.toggle('active', tabs[i] === name);
   });
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -1010,6 +1125,7 @@ function setTab(name) {
 
   clearInterval(refreshTimer);
   if (name === 'status') { fetchStatus(); refreshTimer = setInterval(fetchStatus, 30000); }
+  else if (name === 'analytics') { fetchAnalytics(); }
   else if (name === 'budget') { fetchBudgetDetail(); refreshTimer = setInterval(fetchBudgetDetail, 60000); }
   else if (name === 'projects') { fetchProjects(); }
   else if (name === 'logs') { if (logEntries.length === 0) resetLogs(); }
@@ -1587,6 +1703,159 @@ function renderMd(raw) {
   if (inTable) out.push('</table>');
 
   return out.join('\\n');
+}
+
+// ---- Fetch & Render: Analytics ----
+async function fetchAnalytics() {
+  try {
+    analyticsData = await (await fetch('/api/analytics')).json();
+    renderAnalytics();
+  } catch (e) { document.getElementById('analytics-content').textContent = 'Error: ' + e.message; }
+}
+
+function renderAnalytics() {
+  const a = analyticsData;
+  if (!a) { document.getElementById('analytics-content').textContent = 'Loading...'; return; }
+  let html = '';
+
+  // ---- Summary strip ----
+  const totalNonSkip = a.total_entries - (a.outcomes.skipped || 0);
+  html += '<div class="card"><h2>Summary</h2>';
+  html += '<div style="display:flex;gap:24px;flex-wrap:wrap">';
+  html += '<div><div class="ana-big">' + a.total_entries + '</div><div class="ana-label">total entries</div></div>';
+  html += '<div><div class="ana-big" style="color:var(--green)">' + (a.outcomes.success || 0) + '</div><div class="ana-label">successes</div></div>';
+  html += '<div><div class="ana-big" style="color:var(--red)">' + (a.outcomes.error || 0) + '</div><div class="ana-label">errors</div></div>';
+  html += '<div><div class="ana-big" style="color:var(--text-dim)">' + (a.outcomes.skipped || 0) + '</div><div class="ana-label">skipped</div></div>';
+  html += '<div><div class="ana-big" style="color:var(--yellow)">' + (a.outcomes['dry-run'] || 0) + '</div><div class="ana-label">dry runs</div></div>';
+  html += '</div>';
+  if (a.first_entry) html += '<div style="margin-top:8px;font-size:11px" class="dim">Tracking since ' + fmtDate(a.first_entry) + '</div>';
+  html += '</div>';
+
+  // ---- Skip Reason Breakdown (horizontal bars) ----
+  const reasons = Object.entries(a.skip_reasons).sort((x, y) => y[1] - x[1]);
+  const maxReason = reasons.length > 0 ? reasons[0][1] : 1;
+  html += '<div class="card"><h2>Skip Reasons</h2>';
+  if (reasons.length === 0) {
+    html += '<div class="dim">No skips recorded</div>';
+  } else {
+    reasons.forEach(([reason, count]) => {
+      const pct = (count / maxReason * 100).toFixed(0);
+      const color = reason.includes('reserve') ? 'var(--yellow)' : reason.includes('active') ? 'var(--cyan)' : 'var(--text-dim)';
+      html += '<div class="ana-bar-row">';
+      html += '<span class="ana-bar-label">' + esc(reason) + '</span>';
+      html += '<div class="ana-bar-track"><div class="ana-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>';
+      html += '<span class="ana-bar-count">' + count + '</span>';
+      html += '</div>';
+    });
+  }
+  html += '</div>';
+
+  // ---- 14-Day Activity (stacked bars) ----
+  html += '<div class="card"><h2>14-Day Activity</h2>';
+  const maxDay = Math.max(1, ...a.daily.map(d => d.success + d.error + d.skipped + d['dry-run'] + d.other));
+  html += '<div class="ana-stacked">';
+  a.daily.forEach((d, i) => {
+    const total = d.success + d.error + d.skipped + d['dry-run'] + d.other;
+    const h = total > 0 ? (total / maxDay * 120) : 2;
+    const segments = [];
+    if (d.success > 0) segments.push({ h: d.success / total * h, color: 'var(--green)' });
+    if (d.error > 0) segments.push({ h: d.error / total * h, color: 'var(--red)' });
+    if (d['dry-run'] > 0) segments.push({ h: d['dry-run'] / total * h, color: 'var(--yellow)' });
+    if (d.skipped > 0) segments.push({ h: d.skipped / total * h, color: 'var(--border)' });
+    if (d.other > 0) segments.push({ h: d.other / total * h, color: 'var(--magenta)' });
+    const isToday = i === a.daily.length - 1;
+    const title = d.date + ': ' + d.success + ' ok, ' + d.error + ' err, ' + d.skipped + ' skip, ' + d['dry-run'] + ' dry';
+    html += '<div class="ana-stack-col" title="' + esc(title) + '">';
+    html += '<div class="ana-stack-bars" style="height:120px">';
+    segments.forEach(seg => {
+      html += '<div style="height:' + Math.max(seg.h, 1).toFixed(0) + 'px;background:' + seg.color + ';width:100%;border-radius:2px"></div>';
+    });
+    html += '</div>';
+    html += '<div class="ana-stack-label' + (isToday ? ' today' : '') + '">' + d.date.slice(5) + '</div>';
+    if (total > 0) html += '<div class="ana-stack-count">' + total + '</div>';
+    html += '</div>';
+  });
+  html += '</div>';
+  html += '<div class="ana-legend">';
+  html += '<span><span class="ana-dot" style="background:var(--green)"></span>success</span>';
+  html += '<span><span class="ana-dot" style="background:var(--red)"></span>error</span>';
+  html += '<span><span class="ana-dot" style="background:var(--yellow)"></span>dry-run</span>';
+  html += '<span><span class="ana-dot" style="background:var(--border)"></span>skipped</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // ---- Hourly Heatmap ----
+  html += '<div class="card"><h2>Activity by Hour (local time)</h2>';
+  const maxHour = Math.max(1, ...a.hourly.map(h => h.dispatches + h.skips));
+  html += '<div class="ana-heatmap">';
+  a.hourly.forEach(h => {
+    const total = h.dispatches + h.skips;
+    const intensity = total / maxHour;
+    const bg = total === 0 ? 'var(--surface2)' :
+      h.dispatches > h.skips ? 'rgba(158,206,106,' + (0.15 + intensity * 0.7).toFixed(2) + ')' :
+      'rgba(122,162,247,' + (0.15 + intensity * 0.7).toFixed(2) + ')';
+    const label = String(h.hour).padStart(2, '0');
+    html += '<div class="ana-heat-cell" style="background:' + bg + '" title="' + label + ':00 - ' + h.dispatches + ' dispatches, ' + h.skips + ' skips">';
+    html += '<div class="ana-heat-hour">' + label + '</div>';
+    html += '<div class="ana-heat-count">' + total + '</div>';
+    html += '</div>';
+  });
+  html += '</div>';
+  html += '<div class="ana-legend" style="margin-top:6px">';
+  html += '<span><span class="ana-dot" style="background:rgba(158,206,106,0.7)"></span>dispatches</span>';
+  html += '<span><span class="ana-dot" style="background:rgba(122,162,247,0.7)"></span>mostly skips</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // ---- Per-Project Stats ----
+  const projects = Object.entries(a.project_stats).sort((x, y) => y[1].total - x[1].total);
+  if (projects.length > 0) {
+    const maxProj = projects[0][1].total;
+    html += '<div class="card"><h2>Projects</h2>';
+    projects.forEach(([slug, stats]) => {
+      const pct = (stats.total / maxProj * 100).toFixed(0);
+      html += '<div class="ana-bar-row">';
+      html += '<span class="ana-bar-label">' + esc(slug) + '</span>';
+      html += '<div class="ana-bar-track">';
+      // stacked: success green, error red, skip gray
+      const sw = stats.total > 0 ? (stats.success / stats.total * parseFloat(pct)).toFixed(0) : 0;
+      const ew = stats.total > 0 ? (stats.error / stats.total * parseFloat(pct)).toFixed(0) : 0;
+      const skw = Math.max(0, parseFloat(pct) - parseFloat(sw) - parseFloat(ew));
+      if (stats.success > 0) html += '<div class="ana-bar-fill" style="width:' + sw + '%;background:var(--green);display:inline-block"></div>';
+      if (stats.error > 0) html += '<div class="ana-bar-fill" style="width:' + ew + '%;background:var(--red);display:inline-block"></div>';
+      if (stats.skipped > 0) html += '<div class="ana-bar-fill" style="width:' + skw + '%;background:var(--border);display:inline-block"></div>';
+      html += '</div>';
+      html += '<span class="ana-bar-count">' + stats.success + '/' + stats.error + '/' + stats.skipped + '</span>';
+      html += '</div>';
+      // Show top tasks
+      const topTasks = Object.entries(stats.tasks).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      if (topTasks.length > 0) {
+        html += '<div class="ana-proj-tasks">';
+        topTasks.forEach(([task, count]) => { html += '<span class="ana-task-tag">' + esc(task) + ' <b>' + count + '</b></span>'; });
+        html += '</div>';
+      }
+    });
+    html += '</div>';
+  }
+
+  // ---- Model Usage ----
+  const models = Object.entries(a.model_stats).sort((x, y) => y[1].total - x[1].total);
+  if (models.length > 0) {
+    const maxModel = models[0][1].total;
+    html += '<div class="card"><h2>Models Used</h2>';
+    models.forEach(([model, stats]) => {
+      const pct = (stats.total / maxModel * 100).toFixed(0);
+      const successRate = stats.total > 0 ? (stats.success / stats.total * 100).toFixed(0) : 0;
+      html += '<div class="ana-bar-row">';
+      html += '<span class="ana-bar-label" style="color:var(--cyan)">' + esc(model) + '</span>';
+      html += '<div class="ana-bar-track"><div class="ana-bar-fill" style="width:' + pct + '%;background:var(--cyan)"></div></div>';
+      html += '<span class="ana-bar-count">' + stats.total + ' (' + successRate + '% ok)</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  document.getElementById('analytics-content').innerHTML = html;
 }
 
 // ---- Actions ----
