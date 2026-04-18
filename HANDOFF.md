@@ -1,10 +1,10 @@
 # Handoff -- Part 19 (2026-04-18 18:30 UTC) -- Selector starvation fix + cowork integration
 
-> **READ THIS FIRST.** Part 19 supersedes Parts 15-18 for current state. This session shipped a hotfix for selector starvation (commit `f868484`) and inherited 6 cowork commits (+1278 lines of new code, including a three-state health model, Analytics tab, ntfy alerting, schema validation, deep research prompt, per-provider timeouts, audit hardening). 5 greenfield sandboxes also got pushed to GitHub as public repos.
+> **READ THIS FIRST.** Part 19 supersedes Parts 15-18 for current state. This session shipped a hotfix for selector starvation (commit `389caca`) and inherited 6 cowork commits (+1278 lines of new code, including a three-state health model, Analytics tab, ntfy alerting, schema validation, deep research prompt, per-provider timeouts, audit hardening). 5 greenfield sandboxes also got pushed to GitHub as public repos.
 
 ## Part 19: TL;DR
 
-- **Shipped:** Selector rotation fix in commit `f868484`. Root cause was worker/verify-commit losing `project`/`task` fields on non-success outcomes, making 47/50 overnight skips invisible to the selector. Fix touches `dispatch.mjs`, `context.mjs`, `selector.mjs` (all hot-path). Self-healing — no manual intervention needed; rotation should unstick within ~200 minutes as other projects populate `last_attempted` for the first time.
+- **Shipped:** Selector rotation fix in commit `389caca`. Root cause was worker/verify-commit losing `project`/`task` fields on non-success outcomes, making 47/50 overnight skips invisible to the selector. Fix touches `dispatch.mjs`, `context.mjs`, `selector.mjs` (all hot-path). Self-healing — no manual intervention needed; rotation should unstick within ~200 minutes as other projects populate `last_attempted` for the first time.
 - **Inherited from cowork (while Perry was away):** 6 commits, +1278 lines. Three-state health model (down/idle/healthy), cross-machine fleet view in dashboard (complements Part 18's gist-side sync), Analytics tab with skip-reason/activity/heatmap/model stats, ntfy.sh alerting on health state transitions, per-provider timeout config, config schema validation (budget.schema.json, 27 new unit tests), audit hardening (credential stripping, DNS rebinding guard), deep research audit prompt doc, open-dashboard.cmd taskbar shortcut.
 - **5 greenfield sandboxes pushed to GitHub as public.** All now at `github.com/pmartin1915/extra-sub-standalone-<slug>`. Each started from a single scaffold commit. Laptop can clone them going forward.
 - **Open Question 1 effectively resolved.** The "greenfield sandboxes never dispatched" problem was the starvation bug in disguise — selector was picking `sandbox-biz-app` repeatedly but those skips weren't being recorded with project fields. Post-fix, the rotation should reach all greenfields naturally.
@@ -23,7 +23,7 @@
 | Fleet files (local) | `fleet-perrypc.json` only |
 | Fleet files (gist) | same -- laptop never ran the wrapper while away |
 | combo auto/* | 15 (unchanged -- no successful dispatches overnight) |
-| Local ahead of origin | 1 commit (`f868484`) not yet pushed |
+| Local ahead of origin | 1 commit (`389caca`) not yet pushed |
 
 ## Part 19: The overnight starvation (what we actually saw)
 
@@ -49,7 +49,7 @@ Without project/task fields, three things broke in the selector feedback loop:
 2. `getLastDispatchTime` (context.mjs:104) only counts success outcomes. Biz-app's `last_dispatched` stayed "never" forever.
 3. The selector saw: "biz-app never attempted, 10 other projects also never attempted" — Rule 3 tiebreaker kept picking biz-app (alphabetically first or just Gemini-flash deterministic at temp=0).
 
-## Part 19: The fix (commit f868484)
+## Part 19: The fix (commit 389caca)
 
 **Three files, all hot-path, gemini-2.5-pro codereviewed with zero critical/high findings.**
 
@@ -109,7 +109,7 @@ New Rule 7b:
 
 ## Part 19: Self-healing expectation
 
-Immediately after `f868484` ships:
+Immediately after `389caca` ships:
 - All projects read as `last_attempted = "never"` (pre-fix skips lack project field → invisible to the new logic).
 - The selector's Rule 3 is told "never ranks more stale than any timestamp."
 - Gemini-flash should rotate through the 10 never-attempted projects first (roughly 200 minutes at 20-min cadence during idle windows).
@@ -174,7 +174,7 @@ All Part 18 invariants still apply. Additions:
 # Selector rotation is NOT stuck on one project:
 tail -200 status/budget-dispatch-log.jsonl | grep -oE 'auto/[a-z-]+-[a-z-]+' | sort | uniq -c | sort -rn
 # Expected: multiple projects picked. If one project dominates >80% for
-# >24h post-f868484, the fix isn't working -- check selector prompt output
+# >24h post-389caca, the fix isn't working -- check selector prompt output
 # in dispatcher-runs/*.log.
 
 # Post-fix: skip entries carry project/task:

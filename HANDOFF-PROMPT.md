@@ -8,7 +8,7 @@ Resume claude-budget-dispatcher.
 ## Required reading (in order)
 
 1. HANDOFF.md -- Part 19 first (selector starvation fix, cowork inheritance, current state), then Part 18 (fleet.json sync), then Part 16 for the only still-open pre-19 question (Q2 boardbound date tests), then Part 15 (invariants + guardrails).
-2. git log --oneline -15  -- expect `f868484 fix: unstick selector rotation` on top, preceded by 6 cowork commits (6d46e44 through 3b88e14) and then Part 18 commits (81e641d, 2af0429).
+2. git log --oneline -15  -- expect `389caca fix: unstick selector rotation` on top, preceded by 6 cowork commits (6d46e44 through 3b88e14) and then Part 18 commits (81e641d, 2af0429).
 3. status/health.json  (or `gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json` from any machine). Three-state now: `{healthy, idle, down}`. "idle" during quiet windows is NORMAL, not a failure.
 4. Cross-machine view: `gh gist view 655d02ce43b293cacdf333a301b63bbf` -- expect health.json, budget-dispatch-last-run.json, budget-dispatch-status.json, fleet-<hostname>.json per machine that has run the wrapper.
 
@@ -16,7 +16,7 @@ Resume claude-budget-dispatcher.
 
 Run the Part 18 second-machine first-run checklist BEFORE anything else:
 
-1. `git pull` -- must include commit `f868484`. If not on origin yet, stop and flag it.
+1. `git pull` -- must include commit `389caca`. If not on origin yet, stop and flag it.
 2. Install pre-commit hook if missing: `cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`
 3. Trigger one wrapper run: `powershell -File scripts/run-dispatcher.ps1 -RepoRoot "$(pwd)" -Engine node`
 4. Verify `status/fleet-<thishostname>.json` was created locally.
@@ -33,7 +33,7 @@ Run the Part 18 second-machine first-run checklist BEFORE anything else:
 5. status/budget-dispatch-last-run.json fresh (<1h during user-active, <4h when idle-eligible)
 6. `cd ../combo && git branch --list 'auto/*' | wc -l` -- should grow over time after Part 19 fix unsticks rotation (was 15 at Parts 17-19 write)
 7. `ls status/fleet-*.json` -- at least this machine's fleet file present
-8. NEW (Part 19): `tail -200 status/budget-dispatch-log.jsonl | grep -oE 'auto/[a-z-]+-[a-z-]+' | sort | uniq -c | sort -rn` -- selector rotation should spread across multiple projects, not concentrate on one. If one project dominates >80% for 24h+ post-f868484, the fix isn't working.
+8. NEW (Part 19): `tail -200 status/budget-dispatch-log.jsonl | grep -oE 'auto/[a-z-]+-[a-z-]+' | sort | uniq -c | sort -rn` -- selector rotation should spread across multiple projects, not concentrate on one. If one project dominates >80% for 24h+ post-389caca, the fix isn't working.
 
 ## Pollution canary (unchanged since Part 17)
 
