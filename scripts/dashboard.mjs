@@ -13,6 +13,7 @@ import { spawn, exec, execFileSync } from "node:child_process";
 
 import { resolveModel } from "./lib/router.mjs";
 import { computeHealth } from "./lib/health.mjs";
+import { getSafeTestEnv } from "./lib/worker.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -93,7 +94,7 @@ function getScheduledTaskInfo() {
       "if($i.NextRunTime){$i.NextRunTime.ToString('o')}else{'none'};" +
       "if($i.LastRunTime.Year -gt 1999){$i.LastRunTime.ToString('o')}else{'none'};" +
       "$i.LastTaskResult",
-    ], { timeout: 5000, encoding: "utf8" }).trim();
+    ], { timeout: 5000, encoding: "utf8", env: getSafeTestEnv() }).trim();
     const [state, next, last, result] = raw.split(/\r?\n/);
     const parsedResult = parseInt(result, 10);
     _taskCache = {
@@ -620,8 +621,13 @@ function updateProjectTasks(slug, tasks) {
 function triggerDispatch(dryRun = true) {
   const args = ["scripts/dispatch.mjs", "--force"];
   if (dryRun) args.push("--dry-run");
+  // A2.1: Forward only safe env + the API keys dispatch.mjs actually needs.
+  const dispatchEnv = getSafeTestEnv();
+  for (const k of ["GEMINI_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"]) {
+    if (process.env[k]) dispatchEnv[k] = process.env[k];
+  }
   const child = spawn("node", args, {
-    cwd: REPO_ROOT, stdio: "ignore", detached: true, env: { ...process.env },
+    cwd: REPO_ROOT, stdio: "ignore", detached: true, env: dispatchEnv,
   });
   child.unref();
   return { ok: true, pid: child.pid, dry_run: dryRun };
@@ -644,8 +650,36 @@ function json(res, obj, status = 200) {
   res.end(body);
 }
 
+// A5.1: Host-header allowlist blocks DNS-rebinding attacks on mutation endpoints.
+// Port-qualified only — browsers always include port for non-standard ports.
+const ALLOWED_HOSTS = new Set([
+  `localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`,
+]);
+const ALLOWED_ORIGINS = new Set([
+  `http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`, `http://[::1]:${PORT}`,
+]);
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // A5.1: Reject non-GET requests with unrecognized Host or Origin headers.
+  if (req.method !== "GET") {
+    const host = req.headers.host;
+    if (!host || !ALLOWED_HOSTS.has(host)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden: invalid Host header");
+      return;
+    }
+    // Origin is only sent by browsers on cross-origin requests. Absent Origin
+    // means same-origin browser request or non-browser client (curl, scripts) —
+    // both are acceptable for a localhost-only service.
+    const origin = req.headers.origin;
+    if (origin && !ALLOWED_ORIGINS.has(origin)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden: invalid Origin header");
+      return;
+    }
+  }
 
   if (req.method === "GET" && url.pathname === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });

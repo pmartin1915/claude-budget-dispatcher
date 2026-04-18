@@ -23,7 +23,7 @@ const WIN_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:$|\.)/i;
 // read by generated tests. Keeps the minimum needed for npm / node / git on Windows.
 const SAFE_ENV_KEYS = [
   "PATH", "Path", "PATHEXT",
-  "SystemRoot", "windir", "COMSPEC",
+  "SystemRoot", "SYSTEMDRIVE", "windir", "COMSPEC",
   "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData",
   "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "USERNAME",
   "TEMP", "TMP",

@@ -34,6 +34,7 @@ import { createWorktree, restoreOrigin, verifyAndCommit } from "./lib/verify-com
 import { appendLog, writeLastRun, rotateLog } from "./lib/log.mjs";
 import { sweepStaleIndexLocks, sweepStaleWorktrees, weeklyGitFsck, weeklyNpmAudit } from "./lib/git-lock.mjs";
 import { initThrottle } from "./lib/throttle.mjs";
+import { checkAndAlert } from "./lib/alerting.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -263,7 +264,17 @@ main()
     writeLastRun({ outcome: "error", reason: e.message }, Date.now() - globalStartMs);
     process.exitCode = 1;
   })
-  .finally(() => {
+  .finally(async () => {
+    // E1.1: Check health state transitions and send alerts (ntfy.sh).
+    try {
+      const alertConfig = JSON.parse(readFileSync(
+        resolve(dirname(fileURLToPath(import.meta.url)), "..", "config", "budget.json"),
+        "utf8",
+      ));
+      await checkAndAlert(alertConfig);
+    } catch (e) {
+      console.warn(`[dispatch] alerting check failed (non-fatal): ${e.message}`);
+    }
     // Give HTTP keep-alive handles time to drain before forcing exit.
     // setImmediate was insufficient -- Gemini/Mistral clients need more than
     // one tick to close their sockets, causing a libuv UV_HANDLE_CLOSING

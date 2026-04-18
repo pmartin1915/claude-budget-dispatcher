@@ -4,6 +4,15 @@
   "paused": false,
   "dry_run": true,
 
+  "$comment_alerting": "E1.1: Out-of-band notifications via ntfy.sh. Set enabled: true and pick a topic to receive alerts when the dispatcher goes down. heartbeat_hours sends a periodic 'still healthy' ping (0 to disable).",
+  "alerting": {
+    "enabled": false,
+    "provider": "ntfy",
+    "topic": "your-topic-here",
+    "on_transitions": ["down"],
+    "heartbeat_hours": 168
+  },
+
   "$comment_engine_override": "Override the scheduled task engine. 'node' = free models only, 'claude' = Claude Max, 'auto' = budget-adaptive (default). null = use -Engine parameter from scheduled task. Set via dashboard (node scripts/dashboard.mjs) or control CLI (node scripts/control.mjs).",
   "engine_override": null,
 

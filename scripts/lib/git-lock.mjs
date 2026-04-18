@@ -7,6 +7,7 @@ import { statSync, unlinkSync, readFileSync, writeFileSync, existsSync } from "n
 import { resolve, dirname } from "node:path";
 import { execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { getSafeTestEnv } from "./worker.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATUS_DIR = resolve(__dirname, "..", "..", "status");
@@ -77,6 +78,7 @@ export function weeklyGitFsck(projectPaths) {
         timeout: 120_000,
         stdio: ["pipe", "pipe", "pipe"],
         encoding: "utf8",
+        env: getSafeTestEnv(),
       });
     } catch (e) {
       const stderr = e.stderr?.toString() ?? e.message;
@@ -109,7 +111,7 @@ export function weeklyGitFsck(projectPaths) {
  * @param {number} [maxAgeDays=7] - Grace period before removal.
  * @returns {Array<{ wtPath: string, branch: string, ageMs: number }>}
  */
-export function sweepStaleWorktrees(projectPaths, maxAgeDays = 7) {
+export function sweepStaleWorktrees(projectPaths, maxAgeDays = 1) {
   const removed = [];
   const cutoffMs = maxAgeDays * 86_400_000;
 
@@ -206,6 +208,7 @@ export function weeklyNpmAudit(repoRoot) {
       timeout: 60_000,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      env: getSafeTestEnv(),
     });
   } catch (e) {
     // npm audit exits non-zero when vulnerabilities are found;

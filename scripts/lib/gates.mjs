@@ -6,6 +6,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countTodayRuns } from "./log.mjs";
+import { getSafeTestEnv } from "./worker.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = resolve(__dirname, "..");
@@ -44,6 +45,7 @@ export function runGates(config, opts = {}) {
       cwd: REPO_ROOT,
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 60_000,
+      env: getSafeTestEnv(),
     });
   } catch (e) {
     if (!isNode) {
@@ -85,6 +87,7 @@ export function runGates(config, opts = {}) {
         cwd: REPO_ROOT,
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 30_000,
+        env: getSafeTestEnv(),
       });
       // Exit 0 = idle, proceed
     } catch (e) {
