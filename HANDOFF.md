@@ -1,3 +1,205 @@
+# Handoff -- Part 19 (2026-04-18 18:30 UTC) -- Selector starvation fix + cowork integration
+
+> **READ THIS FIRST.** Part 19 supersedes Parts 15-18 for current state. This session shipped a hotfix for selector starvation (commit `f868484`) and inherited 6 cowork commits (+1278 lines of new code, including a three-state health model, Analytics tab, ntfy alerting, schema validation, deep research prompt, per-provider timeouts, audit hardening). 5 greenfield sandboxes also got pushed to GitHub as public repos.
+
+## Part 19: TL;DR
+
+- **Shipped:** Selector rotation fix in commit `f868484`. Root cause was worker/verify-commit losing `project`/`task` fields on non-success outcomes, making 47/50 overnight skips invisible to the selector. Fix touches `dispatch.mjs`, `context.mjs`, `selector.mjs` (all hot-path). Self-healing — no manual intervention needed; rotation should unstick within ~200 minutes as other projects populate `last_attempted` for the first time.
+- **Inherited from cowork (while Perry was away):** 6 commits, +1278 lines. Three-state health model (down/idle/healthy), cross-machine fleet view in dashboard (complements Part 18's gist-side sync), Analytics tab with skip-reason/activity/heatmap/model stats, ntfy.sh alerting on health state transitions, per-provider timeout config, config schema validation (budget.schema.json, 27 new unit tests), audit hardening (credential stripping, DNS rebinding guard), deep research audit prompt doc, open-dashboard.cmd taskbar shortcut.
+- **5 greenfield sandboxes pushed to GitHub as public.** All now at `github.com/pmartin1915/extra-sub-standalone-<slug>`. Each started from a single scaffold commit. Laptop can clone them going forward.
+- **Open Question 1 effectively resolved.** The "greenfield sandboxes never dispatched" problem was the starvation bug in disguise — selector was picking `sandbox-biz-app` repeatedly but those skips weren't being recorded with project fields. Post-fix, the rotation should reach all greenfields naturally.
+- **Open Question 2 unchanged.** Boardbound date-sensitive vitest failures still block non-audit dispatches on that repo.
+
+## Part 19: State check (2026-04-18 18:30 UTC / 13:30 CDT)
+
+| Check | Result |
+|---|---|
+| Health | `idle` (three-state model: "no work found in 22.9h" -- alive, rotating, just skipping) |
+| Last success | 2026-04-17T19:13:25Z wilderness/audit (pre-Part-18) |
+| JSONL pollution canary | **10** (unchanged from Part 17) |
+| Pre-commit hook | matches `scripts/hooks/pre-commit` |
+| `node --check` all .mjs | clean (21 files incl. new alerting.mjs + test files) |
+| Dashboard | 200 OK, 11 projects + Analytics tab + Fleet tab both live |
+| Fleet files (local) | `fleet-perrypc.json` only |
+| Fleet files (gist) | same -- laptop never ran the wrapper while away |
+| combo auto/* | 15 (unchanged -- no successful dispatches overnight) |
+| Local ahead of origin | 1 commit (`f868484`) not yet pushed |
+
+## Part 19: The overnight starvation (what we actually saw)
+
+47 out of 50 real dispatches in the last 24 hours hit this pattern:
+
+```
+{"ts": "2026-04-18T13:12:18.976Z",
+ "outcome": "skipped",
+ "reason": "no-files-to-analyze",
+ "worktree": {"path": ".../auto-sandbox-biz-app-research-...",
+              "branch": "auto/sandbox-biz-app-research-..."},
+ "phase": "complete"}
+```
+
+Notable: **no `project` field, no `task` field at the top level** — only the worktree branch name encoded `sandbox-biz-app` and `research`.
+
+- 47 skips of sandbox-biz-app + research
+- 2 skips for user-active
+- 1 selector-failed
+
+Without project/task fields, three things broke in the selector feedback loop:
+1. `getRecentOutcomes` (context.mjs:169) filters on `obj.project === slug && obj.task`. Every skip was invisible.
+2. `getLastDispatchTime` (context.mjs:104) only counts success outcomes. Biz-app's `last_dispatched` stayed "never" forever.
+3. The selector saw: "biz-app never attempted, 10 other projects also never attempted" — Rule 3 tiebreaker kept picking biz-app (alphabetically first or just Gemini-flash deterministic at temp=0).
+
+## Part 19: The fix (commit f868484)
+
+**Three files, all hot-path, gemini-2.5-pro codereviewed with zero critical/high findings.**
+
+### scripts/dispatch.mjs:256-267
+
+```javascript
+appendLog({
+  ...finalResult,
+  // Always carry project/task from selection on ALL outcomes (success,
+  // reverted, skipped-from-worker). verify-commit early-returns the raw
+  // workResult on non-success, and worker's no-files-to-analyze skip
+  // lacks these fields -- which left the selector's recent_outcomes
+  // blind and caused single-project starvation (Part 19).
+  project: selection.project,
+  task: selection.task,
+  phase: "complete",
+  engine: "dispatch.mjs",
+  duration_ms: Date.now() - startMs,
+});
+```
+
+Spread order: `finalResult` first so its fields are preserved, then `selection.project`/`task` override if the spread lacked them. For success outcomes verify-commit already sets these same values — no conflict.
+
+### scripts/lib/context.mjs (new helper)
+
+```javascript
+function getLastAttemptTime(slug, logPath) {
+  // ... mirrors getLastDispatchTime but drops outcome==="success" requirement
+  if (obj.project === slug && obj.ts) return obj.ts;
+}
+```
+
+New field `last_attempted` plumbed into `buildProjectContext` return value alongside existing `last_dispatched` (success-only, kept for Rule 2).
+
+### scripts/lib/selector.mjs buildSelectorPrompt
+
+Project block now shows both timestamps:
+```
+- Last successful dispatch: 2026-04-17T19:13:25.628Z
+- Last attempted (any outcome): never
+```
+
+Rule 3 updated:
+```
+3. Least-recently-ATTEMPTED (any outcome, not just success) -> tiebreaker.
+   "never" ranks as more stale than any timestamp -- always prefer a
+   never-attempted project when Rule 1/2 are tied.
+```
+
+New Rule 7b:
+```
+7b. Avoid tasks that were SKIPPED 3+ consecutive times with the SAME reason
+    (e.g. "no-files-to-analyze") -- the outcome is deterministic and will
+    keep skipping. Pick a different task for that project, or a different
+    project entirely.
+```
+
+## Part 19: Self-healing expectation
+
+Immediately after `f868484` ships:
+- All projects read as `last_attempted = "never"` (pre-fix skips lack project field → invisible to the new logic).
+- The selector's Rule 3 is told "never ranks more stale than any timestamp."
+- Gemini-flash should rotate through the 10 never-attempted projects first (roughly 200 minutes at 20-min cadence during idle windows).
+- Each rotation writes a project-tagged JSONL entry, populating `last_attempted` for that project.
+- After ~11 dispatches, all projects have real `last_attempted` timestamps. Rule 3 can now tiebreak properly.
+- Biz-app's starvation ends the moment it's no longer the only "never".
+
+**Failure mode to watch:** if biz-app keeps getting picked 24h+ after the fix ships, something is wrong with the prompt interpretation. Check `status/dispatcher-runs/*.log` for the latest selector response — should show the new Rule 3 in the prompt and a `reason` field that references "never" or "least-recently-attempted".
+
+## Part 19: Inventory of cowork inheritance (what the other session shipped)
+
+Read these files before making related changes:
+
+| File | Change | Hot-path? |
+|---|---|---|
+| `config/budget.schema.json` | NEW 146-line JSON Schema for budget.json validation | No |
+| `docs/DEEP-RESEARCH-PROMPT.md` | NEW 161-line prompt spec | No |
+| `package.json` | Updated dep or script | No |
+| `scripts/dashboard.mjs` | +445 lines: Analytics tab, Fleet tab cross-machine view, three-state health banner | No |
+| `scripts/dispatch.mjs` | +38 lines: checkAndAlert call in finally; other minor | **Yes** |
+| `scripts/lib/__tests__/health.test.mjs` | NEW 143 lines vitest tests | No (tests) |
+| `scripts/lib/__tests__/worker.test.mjs` | NEW 132 lines vitest tests | No (tests) |
+| `scripts/lib/alerting.mjs` | NEW 123 lines: ntfy.sh push on health state transitions | **Yes** (new) |
+| `scripts/lib/gates.mjs` | +3 lines | **Yes** |
+| `scripts/lib/git-lock.mjs` | +5 lines | **Yes** |
+| `scripts/lib/health.mjs` | +30 lines: three-state down/idle/healthy model | **Yes** |
+| `scripts/lib/provider.mjs` | +34 lines: per-provider timeouts | **Yes** |
+| `scripts/lib/worker.mjs` | +44 lines: audit hardening (credential stripping, DNS rebinding guard) | **Yes** |
+| `scripts/open-dashboard.cmd` | NEW 6-line taskbar shortcut | No |
+
+The **hot-path list now expands**:
+
+`dispatch.mjs`, `worker.mjs`, `verify-commit.mjs`, `provider.mjs`, `router.mjs`, `throttle.mjs`, `selector.mjs`, `context.mjs`, `run-dispatcher.ps1`, `scripts/lib/health.mjs`, `scripts/lib/fleet.mjs`, **`scripts/lib/alerting.mjs`** (new), **`scripts/lib/gates.mjs`**, **`scripts/lib/git-lock.mjs`**.
+
+A **dedicated audit pass on the cowork changes is recommended** for a future session — +1278 lines is a lot of new surface area, and some features (ntfy alerting, credential stripping in worker) have real security implications that deserve scrutiny.
+
+## Part 19: Greenfield sandboxes now on GitHub
+
+Created public repos during this session:
+
+- `github.com/pmartin1915/extra-sub-standalone-biz-app`
+- `github.com/pmartin1915/extra-sub-standalone-game-adventure`
+- `github.com/pmartin1915/extra-sub-standalone-dnd-game`
+- `github.com/pmartin1915/extra-sub-standalone-sand-physics`
+- `github.com/pmartin1915/extra-sub-standalone-worldbuilder`
+
+Each has exactly one scaffold commit from 2026-04-16. The laptop can now clone these going forward. **Config is still local-only** (`config/budget.json` is gitignored and paths are machine-specific), so setting up the laptop to dispatch to these projects requires: (a) cloning to `c:\Users\perry\DevProjects\sandbox\extra-sub-standalone-<slug>` on the laptop, (b) copying budget.json config, (c) no further code work.
+
+## Part 19: Open questions -- state
+
+1. ~~**Greenfield sandboxes never dispatched.**~~ **Effectively resolved** by Part 19. The starvation bug was the cause; fix is in. Monitor for ~24h post-push to confirm rotation reaches each greenfield at least once.
+2. **Boardbound date-sensitive vitest failures** — UNCHANGED. `tests-gen`/`refactor`/`fix` will still revert. Surgical fix recommended: `vi.useFakeTimers()` in boardbound repo. Out of scope for dispatcher.
+3. ~~**Cross-machine status board.**~~ **SHIPPED** (Part 18 gist-side, cowork session dashboard-side).
+4. **NEW: Consolidate context.mjs log I/O (MEDIUM -- future refactor).** Gemini 2.5-pro flagged during Part 19 codereview: `getLastDispatchTime`, `getLastAttemptTime`, and `getRecentOutcomes` each independently read the JSONL log. For a 10k+ entry log, this is 3× redundant I/O per selector call. Current performance is acceptable (selector runs ~once per 20 min, and log is only 762 lines), but a single-pass helper returning `{lastDispatch, lastAttempt, recentOutcomes}` would be cleaner. **Recommended for a future session, not this one.**
+5. **NEW: Audit the cowork changes.** 1278 lines, some with security implications (ntfy alerting sends plaintext HTTP by default; worker audit hardening involves credential-stripping regex that could be bypassed). Pass a systematic review before extending those subsystems.
+
+## Part 19: New canaries + checks
+
+All Part 18 invariants still apply. Additions:
+
+```bash
+# Selector rotation is NOT stuck on one project:
+tail -200 status/budget-dispatch-log.jsonl | grep -oE 'auto/[a-z-]+-[a-z-]+' | sort | uniq -c | sort -rn
+# Expected: multiple projects picked. If one project dominates >80% for
+# >24h post-f868484, the fix isn't working -- check selector prompt output
+# in dispatcher-runs/*.log.
+
+# Post-fix: skip entries carry project/task:
+tail -5 status/budget-dispatch-log.jsonl | grep '"outcome":"skipped"' | head -1
+# Expected: fields "project" and "task" present at top level (not just
+# nested in worktree.branch).
+
+# Health state is one of {healthy, idle, down}, not just healthy/down:
+node -e 'console.log(JSON.parse(require("fs").readFileSync("status/health.json","utf8")).state)'
+# Expected: "healthy" during normal ops, "idle" during long user-active
+# windows, "down" only on real failures. If you see "down" during a
+# quiet weekend, that's the old two-state output -- re-run health.mjs.
+```
+
+## Part 19: Things NOT to do
+
+All Parts 14-18 restrictions still apply. Additions from this session:
+
+- Do not revert the project/task attachment at `dispatch.mjs:256-267` without also reverting the corresponding `context.mjs` and `selector.mjs` changes — all three are coupled. A partial revert would re-introduce starvation OR make the selector confused by orphaned signals.
+- Do not rely on `last_dispatched` alone for rotation decisions going forward. Use `last_attempted` — `last_dispatched` is kept only for Rule 2 (staleness) and dashboard display.
+- Do not change Rule 3 wording without checking that "never ranks as more stale than any timestamp" is preserved — that's the key guidance the selector needs when rotating across first-time projects.
+- Do not start extending the cowork features (Analytics tab, alerting, schema validation) without first reading the corresponding commits in detail. A drive-by edit without context has a high chance of breaking something.
+
+---
+
 # Handoff -- Part 18 (2026-04-17 21:20 UTC) -- Fleet.json gist sync shipped
 
 > **READ THIS FIRST.** Part 18 supersedes Parts 15-17 for current state. This session shipped Open Question 3 (cross-machine fleet.json gist sync) in commit `2af0429`. Parts 15-17 below remain authoritative for invariants, failure modes, and open questions 1-2.

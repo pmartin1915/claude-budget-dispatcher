@@ -7,71 +7,89 @@ Resume claude-budget-dispatcher.
 
 ## Required reading (in order)
 
-1. HANDOFF.md -- Part 18 first (fleet.json shipped, current state), then Part 16 (open questions 1-2 -- Q3 is now done), then Part 15 (invariant protocol, failure-modes table, guardrails).
-2. git log --oneline -10  -- expect `2af0429 feat: fleet.json per-machine gist sync` on top.
-3. status/health.json  (or `gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json` from any machine)
-4. Cross-machine view: `gh gist view 655d02ce43b293cacdf333a301b63bbf` -- expect at least `health.json`, `budget-dispatch-last-run.json`, and one or more `fleet-<hostname>.json` files.
+1. HANDOFF.md -- Part 19 first (selector starvation fix, cowork inheritance, current state), then Part 18 (fleet.json sync), then Part 16 for the only still-open pre-19 question (Q2 boardbound date tests), then Part 15 (invariants + guardrails).
+2. git log --oneline -15  -- expect `f868484 fix: unstick selector rotation` on top, preceded by 6 cowork commits (6d46e44 through 3b88e14) and then Part 18 commits (81e641d, 2af0429).
+3. status/health.json  (or `gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json` from any machine). Three-state now: `{healthy, idle, down}`. "idle" during quiet windows is NORMAL, not a failure.
+4. Cross-machine view: `gh gist view 655d02ce43b293cacdf333a301b63bbf` -- expect health.json, budget-dispatch-last-run.json, budget-dispatch-status.json, fleet-<hostname>.json per machine that has run the wrapper.
 
-## If this is a FRESH machine (first time running Part 18 code)
+## If this is a FRESH machine (e.g. the laptop first picking this up)
 
 Run the Part 18 second-machine first-run checklist BEFORE anything else:
 
-1. `git pull` -- must include commit `2af0429`. If not, Perry hasn't pushed yet; stop and flag it.
-2. Install pre-commit hook if missing: `cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
-3. Trigger one wrapper run (user-active skip is fine): `powershell -File scripts/run-dispatcher.ps1 -RepoRoot "$(pwd)" -Engine node`
+1. `git pull` -- must include commit `f868484`. If not on origin yet, stop and flag it.
+2. Install pre-commit hook if missing: `cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`
+3. Trigger one wrapper run: `powershell -File scripts/run-dispatcher.ps1 -RepoRoot "$(pwd)" -Engine node`
 4. Verify `status/fleet-<thishostname>.json` was created locally.
 5. Verify remote: `gh gist view 655d02ce43b293cacdf333a301b63bbf` lists `fleet-<thishostname>.json`.
 6. Pollution canary: `grep -c '^\[' status/budget-dispatch-log.jsonl` MUST be 10.
+7. Greenfield sandboxes: `git clone https://github.com/pmartin1915/extra-sub-standalone-<slug>` for each of {biz-app, game-adventure, dnd-game, sand-physics, worldbuilder} to the path listed in the local `config/budget.json` (which is gitignored -- copy from the wilderness machine).
 
-If step 4 produces `fleet-unknown.json`, COMPUTERNAME was unset. Unusual on Windows -- investigate. If step 5 fails with `unsure what file to edit`, Part 16 Bug A is recurring -- STOP and investigate before doing anything else.
+## Before touching code: run the 8 invariants (Part 15 + Part 18 + Part 19 additions)
 
-## Before touching code: run the 7 invariants (Part 15 + Part 18 additions)
+1. `node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json` -> expect "healthy (ok)" or "idle (no work found in Xh)"
+2. Pre-commit hook installed: `diff scripts/hooks/pre-commit .git/hooks/pre-commit` -> empty
+3. `node --check` on every .mjs under scripts/ (includes fleet.mjs + new alerting.mjs + test files)
+4. Dashboard loads: http://localhost:7380 -> Fleet tab + Analytics tab both render
+5. status/budget-dispatch-last-run.json fresh (<1h during user-active, <4h when idle-eligible)
+6. `cd ../combo && git branch --list 'auto/*' | wc -l` -- should grow over time after Part 19 fix unsticks rotation (was 15 at Parts 17-19 write)
+7. `ls status/fleet-*.json` -- at least this machine's fleet file present
+8. NEW (Part 19): `tail -200 status/budget-dispatch-log.jsonl | grep -oE 'auto/[a-z-]+-[a-z-]+' | sort | uniq -c | sort -rn` -- selector rotation should spread across multiple projects, not concentrate on one. If one project dominates >80% for 24h+ post-f868484, the fix isn't working.
 
-1. node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json  -> expect "healthy (ok)"
-2. Pre-commit hook installed: `diff scripts/hooks/pre-commit .git/hooks/pre-commit`  -> empty
-3. `node --check` on every .mjs under scripts/  (includes the NEW scripts/lib/fleet.mjs)
-4. Dashboard loads: http://localhost:7380 -> Fleet tab renders 11 projects
-5. status/budget-dispatch-last-run.json fresh (<1h if user-active window, <4h if idle-eligible)
-6. `cd ../combo && git branch --list 'auto/*' | wc -l`  -- should grow over time (was 15 at Part 17/18 write)
-7. NEW: `ls status/fleet-*.json` -- at least this machine's file present, schema parseable (keys: machine, last_run_*, last_dispatch_*, computed_at)
+## Pollution canary (unchanged since Part 17)
 
-## Pollution canary (unchanged from Part 17)
+`grep -c '^\[' status/budget-dispatch-log.jsonl` -> MUST be **10** and stay 10 forever.
+If it grows: new Write-Log path bleeding into JSONL. Check the Part 18 fleet block AND the Part 19 appendLog edits.
 
-`grep -c '^\[' status/budget-dispatch-log.jsonl`  -> MUST be **10** and stay 10 forever.
-If it grows: new run-dispatcher.ps1 case-collision or another Write-Log path bleeding into JSONL. Part 18 added a fleet block to the finally -- double-check nothing new there is misrouted. See Part 16 Bug B, Part 18 guardrails.
+## Part 19 project/task canary
 
-## Open questions -- pick one and run (Q3 shipped in Part 18; full detail in HANDOFF.md Part 16)
+Post-fix, every non-error JSONL entry should have project+task at top level. Test:
 
-1. **Greenfield sandboxes have never been dispatched** (5 projects, zero auto/* branches). Recommended path: wait 24h -> trace selector -> soft STATE.md bias -> hard `never_dispatched_bonus`. Start with observation, not code. If 48h+ have passed since Part 17 with still-zero sandbox entries in `tail -200 status/budget-dispatch-log.jsonl | grep project`, graduate to the selector-trace step.
+```bash
+tail -20 status/budget-dispatch-log.jsonl | node -e "
+const lines = require('fs').readFileSync(0,'utf8').trim().split('\n');
+for (const l of lines) {
+  try {
+    const o = JSON.parse(l);
+    if (o.outcome && o.outcome !== 'wrapper-success' && o.outcome !== 'error' && !o.project) {
+      console.log('MISSING project:', l.slice(0, 120));
+    }
+  } catch {}
+}
+"
+```
+Empty output is healthy. Any missing-project warning means a new appendLog call site regressed Part 19.
 
-2. **boardbound date-sensitive vitest failures** block non-audit dispatches. Recommended: surgical `vi.useFakeTimers()` fix in the boardbound repo, not the dispatcher. If boardbound shows `outcome:"reverted"` entries for tests-gen/refactor/fix (not audit), this is the culprit.
+## Open questions -- current state
 
-3. **Cross-machine status board** -- SHIPPED in Part 18. Verify fleet-*.json files exist for each machine that has run the wrapper. Future polish (out of scope this weekend): wire `dashboard.mjs` to read fleet-*.json and display a "machine last-active" column on the Fleet tab.
+1. ~~Greenfield sandboxes never dispatched~~ -- effectively RESOLVED by Part 19 + pushing the 5 GitHub repos. Monitor for ~24h to confirm rotation reaches each greenfield at least once.
+2. **Boardbound date-sensitive vitest failures** block non-audit dispatches. Recommended: surgical `vi.useFakeTimers()` fix in the boardbound repo. Out of scope for dispatcher.
+3. ~~Cross-machine status board~~ -- SHIPPED Parts 18 + cowork.
+4. **NEW (Part 19): Consolidate context.mjs log I/O.** 3× redundant JSONL reads per selector call. Gemini flagged as MEDIUM; acceptable-to-defer. Refactor into a single-pass helper returning `{lastDispatch, lastAttempt, recentOutcomes}` for a future session.
+5. **NEW (Part 19): Audit the 6 cowork commits.** +1278 lines, includes security-relevant code (alerting.mjs sends HTTP plaintext by default; worker.mjs audit hardening uses credential-stripping regex that could be bypassed with edge inputs). Run `mcp__pal__codereview` with gemini-2.5-pro before extending those subsystems.
 
 ## Audit discipline -- MANDATORY on hot-path files
 
-Hot-path (Part 18 expanded list): dispatch.mjs, worker.mjs, verify-commit.mjs, provider.mjs, router.mjs, throttle.mjs, selector.mjs, context.mjs, run-dispatcher.ps1, scripts/lib/health.mjs, **scripts/lib/fleet.mjs**.
+Hot-path (Part 19 expanded list): `dispatch.mjs`, `worker.mjs`, `verify-commit.mjs`, `provider.mjs`, `router.mjs`, `throttle.mjs`, `selector.mjs`, `context.mjs`, `run-dispatcher.ps1`, `scripts/lib/health.mjs`, `scripts/lib/fleet.mjs`, **`scripts/lib/alerting.mjs`** (new), **`scripts/lib/gates.mjs`**, **`scripts/lib/git-lock.mjs`**.
 
 Before any commit that touches hot-path:
-  mcp__pal__codereview  with  model: "gemini-2.5-pro"
+  mcp__pal__codereview with model: "gemini-2.5-pro"
 Fallback: review_validation_type: "internal" if Gemini 503s.
 
-**Note from Part 18:** Gemini can overstate severity. The Part 18 review flagged a HIGH on CRLF parsing that turned out to be empirically not a correctness bug (JSON.parse treats \r as whitespace per ECMA-404). Apply findings, but verify claims empirically when you have the data. "HIGH" in Gemini's output is not a trump card -- cross-check against the actual runtime behavior.
+**From Part 18:** Gemini can overstate severity. Verify empirically when you can. "HIGH" in Gemini's output is not a trump card -- cross-check against the actual runtime behavior. Part 18 flagged a CRLF "correctness bug" that was actually fine because JSON.parse treats \r as whitespace (ECMA-404).
 
-Docs-only changes (HANDOFF.md, README, config comments) do NOT need codereview.
+## Suggested workflow (Opus <-> Sonnet swap, Parts 17-19)
 
-## Suggested workflow (Opus <-> Sonnet swap, Part 17/18)
-
-- **Opus 4.7 (1M ctx)** = planning + audit. Use for: understanding invariants, tracing bugs, writing handoffs, orchestrating mcp__pal__codereview, judging hot-path risk. Default to Plan mode on any change touching hot-path.
-- **Sonnet 4.6** = implementation once a plan is approved. Switch to it after ExitPlanMode for the mechanical edit phase; switch back to Opus for the pre-commit review pass.
-- **One-shot audits** (no code change): Opus + invariant commands + a short chat update. No Plan mode needed.
+- **Opus 4.7 (1M ctx)** = planning + audit + handoff writing + hot-path orchestration.
+- **Sonnet 4.6** = implementation once a plan is approved. Switch to it after ExitPlanMode for mechanical edits; switch back to Opus for pre-commit review pass.
+- **One-shot audits** (no code change): Opus + invariants + short chat update. No Plan mode needed.
+- For this repo's size of changes (Part 19 was 3 hot-path files + 44 insertions), Plan mode is optional — a clear in-chat proposal + AskUserQuestion before editing works if Perry confirms scope.
 
 ## PAL MCP toolbelt
 
 - `mcp__pal__codereview` (gemini-2.5-pro): final gate before hot-path commits.
 - `mcp__pal__precommit`: sanity-check pending diff before push.
 - `mcp__pal__thinkdeep`: stuck on a root cause, or the symptom doesn't match any failure-mode row in Part 15.
-- `mcp__pal__consensus`: judgment calls (e.g. "wait-24h vs. add never_dispatched_bonus"). Get 2-3 model views.
+- `mcp__pal__consensus`: judgment calls. Get 2-3 model views.
 - `mcp__pal__debug`: surgical investigation in unfamiliar code paths.
 
 ## Do NOT
@@ -81,27 +99,13 @@ Docs-only changes (HANDOFF.md, README, config comments) do NOT need codereview.
 - use `gemini-3-pro-preview`
 - add `-ForceBudget` to the scheduled task
 - use positional `gh gist edit <id> <file>` -- always `-a <file>` on multi-file gists (Part 15 guardrail #8, Part 16 Bug A)
-- add a local variable in `run-dispatcher.ps1` whose name case-matches a script-scope `$Var` (Part 16 Bug B -- PowerShell is case-insensitive, collision silently redirects Write-Log)
+- add a local variable in `run-dispatcher.ps1` whose name case-matches a script-scope `$Var` (Part 16 Bug B)
 - put test stderr into any JSON that flows to `budget-dispatch-log.jsonl` (Part 15 guardrail #2 -- that file is gist-sync candidate)
 - commit hot-path code without `mcp__pal__codereview` gemini-2.5-pro
 - push the handoff commit without Perry's "say the word"
-- rename or relocate `scripts/lib/fleet.mjs` (Part 18 -- `run-dispatcher.ps1` references it by that exact path)
-- write a single merged `fleet.json` across machines (Part 18 -- the per-file race-free model is deliberate)
-- rename the `fleet-<hostname>.json` pattern without also manually cleaning up stale files in the gist
+- rename or relocate `scripts/lib/fleet.mjs` (Part 18)
+- write a single merged `fleet.json` across machines (Part 18)
+- revert the project/task attachment at `dispatch.mjs:256-267` without also reverting `context.mjs` and `selector.mjs` changes (Part 19 -- coupled fix)
+- rely on `last_dispatched` alone for rotation decisions -- use `last_attempted` (Part 19 Rule 3)
+- change Rule 3 wording without preserving "never ranks as more stale than any timestamp" (Part 19 self-healing behavior depends on this)
 ~~~
-
-## Pre-departure checklist for Perry (run BEFORE leaving)
-
-The laptop instance needs these to be true when it comes online this weekend:
-
-1. **Push main.** The Part 18 fleet.json commit (`2af0429`) is on main locally but NOT on origin. The laptop can't use fleet.json until it pulls this.
-   ```bash
-   git push
-   ```
-2. **Bootstrap wilderness' fleet file.** One wrapper invocation (idle window is easiest -- don't force it) creates `fleet-wilderness.json` in the gist. If you want to verify before leaving:
-   ```bash
-   gh gist view 655d02ce43b293cacdf333a301b63bbf
-   # Should list fleet-wilderness.json after the next scheduled dispatch at XX:12 / XX:32 / XX:52.
-   ```
-3. **Sanity-check health on both machines' current state.** Dashboard at `localhost:7380` shows local; gist shows remote.
-4. **Optional: fire a -ForceBudget dispatch on wilderness to seed auto/* branch growth.** Part 17 showed combo auto/* stuck at 15 because user-active has been suppressing real runs. One forced dispatch during the idle window gives the laptop instance a recent data point to analyze.
