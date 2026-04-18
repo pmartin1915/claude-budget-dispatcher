@@ -36,6 +36,8 @@ import { appendLog, writeLastRun, rotateLog } from "./lib/log.mjs";
 import { sweepStaleIndexLocks, sweepStaleWorktrees, weeklyGitFsck, weeklyNpmAudit } from "./lib/git-lock.mjs";
 import { initThrottle } from "./lib/throttle.mjs";
 import { checkAndAlert } from "./lib/alerting.mjs";
+import { acquireDispatchLock, releaseDispatchLock } from "./lib/gist.mjs";
+import { hostname } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -154,6 +156,25 @@ async function main() {
   // Initialize API clients (only after gates pass to avoid key errors on no-op)
   const clients = initClients();
 
+  // F1.1: Distributed dispatch lock — prevent two machines dispatching simultaneously
+  const lockGistId = config.status_gist_id;
+  const lockToken = process.env.GITHUB_TOKEN;
+  const lockResult = await acquireDispatchLock(
+    lockGistId, hostname().toLowerCase(), { token: lockToken }
+  );
+  if (!lockResult.acquired) {
+    console.log(`[dispatch] lock not acquired: ${lockResult.reason}`);
+    appendLog({ outcome: "skipped", reason: "dispatch-locked", phase: "lock", engine: "dispatch.mjs" });
+    writeLastRun({ outcome: "skipped", reason: `dispatch-locked: ${lockResult.reason}` }, Date.now() - startMs);
+    return;
+  }
+  if (lockResult.degraded) {
+    console.warn("[dispatch] running without distributed lock (degraded mode)");
+  }
+
+  // Everything after lock acquisition is wrapped in try/finally to guarantee lock release.
+  try {
+
   // Phase 2: Selector (Gemini, ~2-5K free tokens)
   console.log("[dispatch] phase 2: selector");
   const selection = await selectProjectAndTask(config, clients);
@@ -264,6 +285,13 @@ async function main() {
     // Always restore origin pushurl on worktree (H1 ceremony cleanup)
     if (worktree?.path) {
       restoreOrigin(worktree.path, worktree.originalPushUrl ?? null);
+    }
+  }
+
+  } finally {
+    // F1.1: Release distributed lock (best-effort, never throws)
+    if (lockGistId && lockToken) {
+      await releaseDispatchLock(lockGistId, { token: lockToken });
     }
   }
 }
