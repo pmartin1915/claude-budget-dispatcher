@@ -276,6 +276,13 @@ async function main() {
 
     appendLog({
       ...finalResult,
+      // Always carry project/task from selection on ALL outcomes (success,
+      // reverted, skipped-from-worker). verify-commit early-returns the raw
+      // workResult on non-success, and worker's no-files-to-analyze skip
+      // lacks these fields -- which left the selector's recent_outcomes
+      // blind and caused single-project starvation (Part 19).
+      project: selection.project,
+      task: selection.task,
       phase: "complete",
       engine: "dispatch.mjs",
       duration_ms: Date.now() - startMs,

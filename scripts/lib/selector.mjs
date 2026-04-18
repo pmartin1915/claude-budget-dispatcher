@@ -143,7 +143,8 @@ function buildSelectorPrompt(contexts) {
 - Clinical gate: ${ctx.clinical_gate}
 - Has source files (src/): ${ctx.has_source_files}
 - Allowed tasks: ${ctx.opportunistic_tasks.join(", ")}
-- Last dispatched: ${ctx.last_dispatched}
+- Last successful dispatch: ${ctx.last_dispatched}
+- Last attempted (any outcome): ${ctx.last_attempted}
 
 **State:**
 <data source="STATE.md" project="${ctx.slug}">
@@ -166,12 +167,13 @@ Given these projects and their current state, pick ONE project and ONE task.
 
 ## Rules (in priority order)
 1. Failing tests or typecheck errors -> highest priority
-2. Stale status (oldest last-dispatch timestamp) -> next priority
-3. Least-recently-dispatched -> tiebreaker
+2. Stale status (oldest last successful dispatch) -> next priority
+3. Least-recently-ATTEMPTED (any outcome, not just success) -> tiebreaker. "never" ranks as more stale than any timestamp -- always prefer a never-attempted project when Rule 1/2 are tied.
 4. ONLY pick from the intersection of the project's Pre-Approved Tasks and its "Allowed tasks" list
 5. Tasks that would touch domain/ on clinical_gate=true projects are FORBIDDEN
 6. If has_source_files is false: DO NOT pick docs-gen, tests-gen, session-log, jsdoc, refactor, add-tests, or clean — these tasks need src/ files and will always skip without them. Pick explore, research, audit, self-audit, or roadmap-review instead (these use git history).
-7. Avoid tasks that failed or were reverted in the last 2 consecutive attempts — pick a different task or project instead
+7. Avoid tasks that failed or were reverted in the last 2 consecutive attempts -- pick a different task or project instead.
+7b. Avoid tasks that were SKIPPED 3+ consecutive times with the SAME reason (e.g. "no-files-to-analyze") -- the outcome is deterministic and will keep skipping. Pick a different task for that project, or a different project entirely.
 8. If all projects were recently dispatched and have no urgent issues, pick the one with the most impactful available task
 
 ## Projects

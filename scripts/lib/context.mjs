@@ -58,6 +58,7 @@ export function buildProjectContext(project, logPath) {
   const stateContent = readAndTruncate(statePath, MAX_STATE_CHARS);
 
   const lastDispatch = getLastDispatchTime(project.slug, logPath);
+  const lastAttempt = getLastAttemptTime(project.slug, logPath);
   const recentOutcomes = getRecentOutcomes(project.slug, logPath);
 
   // Check if src/ exists — tasks like docs-gen, tests-gen, refactor, session-log
@@ -77,6 +78,7 @@ export function buildProjectContext(project, logPath) {
     state_summary: stateContent ?? "(no state file)",
     approved_tasks: extractPreApprovedSection(dispatchContent),
     last_dispatched: lastDispatch ?? "never",
+    last_attempted: lastAttempt ?? "never",
     recent_outcomes: recentOutcomes,
   };
 }
@@ -104,6 +106,35 @@ function getLastDispatchTime(slug, logPath) {
       if (obj.project === slug && obj.outcome === "success") {
         return obj.ts;
       }
+    } catch {
+      // skip corrupt line
+    }
+  }
+  return null;
+}
+
+/**
+ * Scan the JSONL log for the most recent dispatch of any outcome for a project.
+ * Unlike getLastDispatchTime (success-only), this advances on skips/reverts too,
+ * so the Rule 3 least-recently-attempted tiebreaker actually rotates (Part 19).
+ * @param {string} slug - Project slug
+ * @param {string} logPath - Path to budget-dispatch-log.jsonl
+ * @returns {string|null} ISO timestamp or null
+ */
+function getLastAttemptTime(slug, logPath) {
+  if (!existsSync(logPath)) return null;
+
+  let lines;
+  try {
+    lines = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+  } catch {
+    return null;
+  }
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const obj = JSON.parse(lines[i]);
+      if (obj.project === slug && obj.ts) return obj.ts;
     } catch {
       // skip corrupt line
     }
