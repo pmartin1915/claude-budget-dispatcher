@@ -1,8 +1,8 @@
 // worker.mjs — Phase 4: Execute work via local commands or free-tier LLM APIs.
 // Handles local tasks, audit, codegen (3-step loop), and docs generation.
 
-import { execFileSync, spawn } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve, relative, sep, dirname, basename } from "node:path";
 import { extractJson } from "./extract-json.mjs";
@@ -519,12 +519,8 @@ function writeDiagnostic(projectPath, file, subsection, stderr) {
     "",
   ].join("\n");
 
-  if (existsSync(notePath)) {
-    const existing = readFileSync(notePath, "utf8");
-    writeFileSync(notePath, existing + entry);
-  } else {
-    writeFileSync(notePath, `# Dispatch Notes — ${machine}\n${entry}`);
-  }
+  const payload = existsSync(notePath) ? entry : `# Dispatch Notes — ${machine}\n${entry}`;
+  appendFileSync(notePath, payload);
 }
 
 /**
@@ -1050,10 +1046,9 @@ export function runWithTreeKill(cmd, args, { cwd, env, timeoutMs }) {
 function killProcessTree(pid) {
   try {
     if (process.platform === "win32") {
-      execFileSync("taskkill", ["/T", "/F", "/PID", String(pid)], {
-        timeout: 10_000,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      // Async fire-and-forget: taskkill can stall under AV interception.
+      // Keeping it synchronous would block the event loop up to 10s.
+      execFile("taskkill", ["/T", "/F", "/PID", String(pid)], { timeout: 10_000 }, () => {});
     } else {
       process.kill(-pid, "SIGKILL");
     }
