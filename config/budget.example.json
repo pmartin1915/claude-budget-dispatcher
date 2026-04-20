@@ -49,7 +49,9 @@
       "research":  "gemini-2.5-pro",
       "tests_gen": "codestral-latest",
       "refactor":  "codestral-latest",
-      "docs_gen":  "mistral-large-latest"
+      "docs_gen":  "mistral-large-latest",
+      "$comment_slot_fill": "Expands flagged subsections in worldbuilder content files against a schema. Needs strong reasoning for YAML structure + linguistics. Free-tier only.",
+      "slot_fill": "gemini-2.5-pro"
     },
     "claude_only": [
       "plan", "design", "architecture",
