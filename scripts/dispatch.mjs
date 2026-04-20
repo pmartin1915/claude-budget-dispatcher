@@ -19,10 +19,11 @@
 //   1 = error (non-fatal, logged)
 //   2 = fatal setup error
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { hostname, tmpdir } from "node:os";
 
 import { GoogleGenAI } from "@google/genai";
 import { Mistral } from "@mistralai/mistralai";
@@ -38,7 +39,6 @@ import { sweepStaleIndexLocks, sweepStaleWorktrees, weeklyGitFsck, weeklyNpmAudi
 import { initThrottle } from "./lib/throttle.mjs";
 import { checkAndAlert } from "./lib/alerting.mjs";
 import { acquireDispatchLock, releaseDispatchLock } from "./lib/gist.mjs";
-import { hostname } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -313,12 +313,89 @@ async function main() {
     }
   }
 
+  // Phase 5c: Auto-open PR for successful auto/* branches (requires auto_push)
+  if (config.auto_pr && config.auto_push && finalResult?.outcome === "success" && finalResult.branch) {
+    const workingDir = worktree?.path ?? selection.projectConfig.path;
+    const bodyPath = resolve(tmpdir(), `dispatcher-pr-body-${Date.now()}.md`);
+    let prUrl = null;
+    try {
+      const title = `[dispatcher] ${selection.task}: ${(finalResult.summary ?? "auto dispatch").slice(0, 70)}`;
+      writeFileSync(bodyPath, buildPrBody(finalResult, selection, route));
+      console.log(`[dispatch] opening PR for ${finalResult.branch}`);
+      prUrl = execFileSync("gh", [
+        "pr", "create",
+        "--head", finalResult.branch,
+        "--title", title,
+        "--body-file", bodyPath,
+      ], {
+        cwd: workingDir,
+        encoding: "utf8",
+        timeout: 30_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      }).trim();
+      console.log(`[dispatch] PR opened: ${prUrl}`);
+    } catch (err) {
+      console.error(`[dispatch] PR creation failed (non-fatal): ${err.message}`);
+    } finally {
+      try { unlinkSync(bodyPath); } catch {}
+    }
+    // Labels are best-effort: missing labels don't block the PR itself.
+    if (prUrl) {
+      try {
+        const labels = [
+          "dispatcher:auto",
+          `task:${route.taskClass}`,
+          `model:${finalResult.modelUsed ?? route.model}`,
+        ].join(",");
+        execFileSync("gh", ["pr", "edit", prUrl, "--add-label", labels], {
+          cwd: workingDir,
+          timeout: 15_000,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (err) {
+        console.error(`[dispatch] label apply failed (non-fatal, PR is open): ${err.message}`);
+      }
+    }
+  }
+
   } finally {
     // F1.1: Release distributed lock (best-effort, never throws)
     if (lockGistId && lockToken) {
       await releaseDispatchLock(lockGistId, { token: lockToken });
     }
   }
+}
+
+/**
+ * Build the markdown body for a dispatcher auto-PR.
+ * @param {object} finalResult - verify-commit output (outcome, branch, commit_hash, files_changed, summary, modelUsed)
+ * @param {{ project: string, task: string, reason?: string }} selection
+ * @param {{ taskClass: string, model: string, candidates?: string[] }} route
+ */
+function buildPrBody(finalResult, selection, route) {
+  const lines = [
+    "## Dispatcher auto-PR",
+    "",
+    `- **Project:** \`${selection.project}\``,
+    `- **Task:** \`${selection.task}\``,
+    `- **Task class:** \`${route.taskClass}\``,
+    `- **Model:** \`${finalResult.modelUsed ?? route.model}\``,
+    `- **Machine:** \`${hostname()}\``,
+    `- **Branch:** \`${finalResult.branch}\``,
+  ];
+  if (finalResult.commit_hash) lines.push(`- **Commit:** \`${String(finalResult.commit_hash).slice(0, 8)}\``);
+  if (finalResult.files_changed !== undefined) lines.push(`- **Files changed:** ${finalResult.files_changed}`);
+  lines.push("", "### Summary", finalResult.summary ?? "(no summary)", "");
+  lines.push("### How to review");
+  lines.push("- **Accept:** click **Merge** above.");
+  lines.push("- **Reject:** click **Close**.");
+  lines.push("- Comment for revision: not currently wired \u2014 planned for a later phase.");
+  if (selection.reason || route.candidates) {
+    lines.push("", "### Metadata");
+    if (route.candidates) lines.push(`- Candidates considered: ${route.candidates.join(", ")}`);
+    if (selection.reason) lines.push(`- Selector reason: ${selection.reason}`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 main()
