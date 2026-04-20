@@ -10,7 +10,9 @@
     "dashboard": "node scripts/dashboard.mjs",
     "control": "node scripts/control.mjs",
     "test": "node --test scripts/lib/__tests__/*.test.mjs",
-    "status": "node scripts/status.mjs"
+    "status": "node scripts/status.mjs",
+    "monitor": "node scripts/remote-status.mjs",
+    "monitor:watch": "node scripts/remote-status.mjs --watch 120"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
