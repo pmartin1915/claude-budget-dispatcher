@@ -5,7 +5,7 @@
 // Backward-compatible: if no project_overrides exist, uses the flat classes map.
 
 /** Map task keywords to delegation classes. */
-const TASK_TO_CLASS = {
+export const TASK_TO_CLASS = {
   // Local tasks (no LLM needed)
   test: "local",
   typecheck: "local",

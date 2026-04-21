@@ -12,7 +12,8 @@
     "test": "node --test scripts/lib/__tests__/*.test.mjs",
     "status": "node scripts/status.mjs",
     "monitor": "node scripts/remote-status.mjs",
-    "monitor:watch": "node scripts/remote-status.mjs --watch 120"
+    "monitor:watch": "node scripts/remote-status.mjs --watch 120",
+    "track-merges": "node scripts/track-merges.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
