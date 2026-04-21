@@ -1,4 +1,4 @@
-# claude-budget-dispatcher
+# budget-dispatcher
 
 > Turn unused Claude Max quota into bounded, safe, autonomous self-improvement work on your projects — while you sleep, study, or work on something else.
 
@@ -90,8 +90,8 @@ Because the **estimator** and the **dispatcher prompt** are decoupled, the expen
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/pmartin1915/claude-budget-dispatcher.git
-cd claude-budget-dispatcher
+git clone https://github.com/pmartin1915/budget-dispatcher.git
+cd budget-dispatcher
 
 # 2. Copy the example config and edit it
 cp config/budget.example.json config/budget.json

@@ -15,7 +15,7 @@
 ### PC (perrypc) — already dispatching, just needs config migration
 
 ```powershell
-cd C:\Users\perry\DevProjects\claude-budget-dispatcher
+cd C:\Users\perry\DevProjects\budget-dispatcher
 git pull
 node scripts/migrate-to-layered-config.mjs
 node scripts/dispatch.mjs --force --dry-run
@@ -26,7 +26,7 @@ The migration script reads the existing budget.json, extracts machine-specific f
 ### Neighbor (DESKTOP-TOJGBG2) — needs config migration + env fix
 
 ```powershell
-cd C:\Users\Perry\DevProjects\claude-budget-dispatcher
+cd C:\Users\Perry\DevProjects\budget-dispatcher
 git pull
 node scripts/migrate-to-layered-config.mjs
 node scripts/dispatch.mjs --force --dry-run

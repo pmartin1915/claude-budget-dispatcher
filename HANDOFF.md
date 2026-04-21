@@ -555,7 +555,7 @@ These were Part 15's "open questions" and remain open after this session. Each b
 
 ### 3. Cross-machine status board (Issue #1) -- no instance uses it yet
 
-**State:** [scripts/status.mjs](scripts/status.mjs) shipped in Part 14. Mature: `checkin`, `checkout`, `conflict`, `read`, `tasks`, `check` subcommands. Posts structured comments to `pmartin1915/claude-budget-dispatcher` issue #1. Zero code paths in `dispatch.mjs` call it today. Gap: nothing records which machine ran which dispatch.
+**State:** [scripts/status.mjs](scripts/status.mjs) shipped in Part 14. Mature: `checkin`, `checkout`, `conflict`, `read`, `tasks`, `check` subcommands. Posts structured comments to `pmartin1915/budget-dispatcher` issue #1. Zero code paths in `dispatch.mjs` call it today. Gap: nothing records which machine ran which dispatch.
 
 **Naive wiring concern:** Current dispatcher cadence is every 20 min from Task Scheduler. Wiring `checkin` + `checkout` to every wrapper invocation = 144 comments/day on issue #1, most of them user-active skips. That floods the board and makes real events invisible.
 
@@ -689,7 +689,7 @@ node scripts/lib/health.mjs status/budget-dispatch-log.jsonl status/health.json
 gh gist view 655d02ce43b293cacdf333a301b63bbf -f health.json
 
 # Restart dashboard
-powershell -Command "Get-NetTCPConnection -LocalPort 7380 -State Listen | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force }; Start-Sleep 1; Start-Process node -ArgumentList 'scripts/dashboard.mjs' -WorkingDirectory 'c:\Users\perry\DevProjects\claude-budget-dispatcher' -WindowStyle Hidden"
+powershell -Command "Get-NetTCPConnection -LocalPort 7380 -State Listen | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force }; Start-Sleep 1; Start-Process node -ArgumentList 'scripts/dashboard.mjs' -WorkingDirectory 'c:\Users\perry\DevProjects\budget-dispatcher' -WindowStyle Hidden"
 
 # Install pre-commit hook (first-time setup on new clones)
 cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
@@ -753,7 +753,7 @@ cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-com
 6. **OpenRouter API key** (optional). Sign up at https://openrouter.ai, set `OPENROUTER_API_KEY`.
 7. **Add burn-wizard to rotation.** Clone from `github.com/pmartin1915/burn-wizard`, create DISPATCH.md, add to config.
 8. **Optiplex thin-client test.** `curl http://<PC-IP>:11434/v1/chat/completions` should work (OLLAMA_HOST=0.0.0.0, firewall rule exists).
-9. **Cross-project status board.** Wire GitHub Issue pmartin1915/claude-budget-dispatcher#1 machine registry into the fleet dashboard so colored cells also show which machine last touched each project.
+9. **Cross-project status board.** Wire GitHub Issue pmartin1915/budget-dispatcher#1 machine registry into the fleet dashboard so colored cells also show which machine last touched each project.
 
 ## Part 14: things NOT to do
 
@@ -845,7 +845,7 @@ Global defaults: explore/audit/research -> gemini-2.5-pro, tests_gen/refactor ->
 3. **Add Groq models to fallback chains.** Groq key is set and verified. E.g. `"groq/llama-3.3-70b-versatile"` in boardbound's tests_gen chain.
 4. **Add burn-wizard to rotation** (mentioned in task list but not yet cloned/configured). Clone from `github.com/pmartin1915/burn-wizard`, create DISPATCH.md, add to config.
 5. **Optiplex thin-client test.** From the Optiplex, `curl http://<PC-IP>:11434/v1/chat/completions ...` should work since OLLAMA_HOST=0.0.0.0. Firewall rule for port 11434 already created. Perry is setting up Optiplex now.
-6. **Cross-project status board (laptop instance shipped scripts/status.mjs).** GitHub Issue pmartin1915/claude-budget-dispatcher#1 has machine registry + structured comment protocol. Instances post checkin/checkout when working on shared repos. Wire this into the fleet progress dashboard so the colored board also shows which machine last touched each project.
+6. **Cross-project status board (laptop instance shipped scripts/status.mjs).** GitHub Issue pmartin1915/budget-dispatcher#1 has machine registry + structured comment protocol. Instances post checkin/checkout when working on shared repos. Wire this into the fleet progress dashboard so the colored board also shows which machine last touched each project.
 
 ## Part 13: things NOT to do
 

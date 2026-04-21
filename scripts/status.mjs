@@ -14,7 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
 
-const REPO = "pmartin1915/claude-budget-dispatcher";
+const REPO = "pmartin1915/budget-dispatcher";
 const ISSUE = "1";
 const MACHINE = hostname();
 

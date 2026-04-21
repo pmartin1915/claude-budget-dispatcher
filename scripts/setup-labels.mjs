@@ -24,7 +24,7 @@ const DRY_RUN = process.argv.includes("--dry-run");
 
 /** Canonical label set applied to every dispatcher-managed repo. */
 const LABELS = [
-  { name: "dispatcher:auto",          color: "0E8A16", desc: "Auto-created by claude-budget-dispatcher" },
+  { name: "dispatcher:auto",          color: "0E8A16", desc: "Auto-created by budget-dispatcher" },
   { name: "task:explore",             color: "1D76DB", desc: "explore task class" },
   { name: "task:research",            color: "1D76DB", desc: "research task class" },
   { name: "task:audit",               color: "5319E7", desc: "audit task class" },

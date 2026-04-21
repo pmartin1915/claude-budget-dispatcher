@@ -19,7 +19,7 @@ Write-Host "GEMINI_API_KEY found (${($gemini.Substring(0,8))}...)" -ForegroundCo
 if ($mistral) { Write-Host "MISTRAL_API_KEY found" -ForegroundColor Green }
 
 # Step 2: Update the scheduled task to pass env vars explicitly
-$repoPath = "C:\Users\Perry\DevProjects\claude-budget-dispatcher"
+$repoPath = "C:\Users\Perry\DevProjects\budget-dispatcher"
 $nodeExe = (Get-Command node).Source
 
 # Build the command that sets env vars then runs dispatch

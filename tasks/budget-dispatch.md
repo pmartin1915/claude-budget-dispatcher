@@ -1,7 +1,7 @@
 # Budget Dispatch (Opportunistic Self-Improvement)
 
 **Cron:** every 20 minutes, all hours (activity gate does real gating)
-**Working directory:** `<REPO_ROOT>` (the cloned claude-budget-dispatcher directory)
+**Working directory:** `<REPO_ROOT>` (the cloned budget-dispatcher directory)
 
 ---
 
@@ -9,7 +9,7 @@
 
 Paste the block below into Claude Code Desktop → Schedule → + New Task. Before pasting, replace these placeholders:
 
-- `<REPO_ROOT>` → absolute path to your cloned claude-budget-dispatcher directory
+- `<REPO_ROOT>` → absolute path to your cloned budget-dispatcher directory
 - (Everything else is self-contained and reads from `<REPO_ROOT>/config/budget.json`)
 
 ```

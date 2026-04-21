@@ -71,8 +71,8 @@ Pick a folder to live in. This guide uses `C:\Users\<you>\DevProjects\`. Replace
 ```powershell
 mkdir C:\Users\<you>\DevProjects
 cd C:\Users\<you>\DevProjects
-git clone https://github.com/pmartin1915/claude-budget-dispatcher
-cd claude-budget-dispatcher
+git clone https://github.com/pmartin1915/budget-dispatcher
+cd budget-dispatcher
 ```
 
 Then the automated setup:
@@ -147,7 +147,7 @@ Confirm paths in `config/budget.json` match where you cloned them.
 Back in the dispatcher repo:
 
 ```powershell
-cd C:\Users\<you>\DevProjects\claude-budget-dispatcher
+cd C:\Users\<you>\DevProjects\budget-dispatcher
 node scripts\dispatch.mjs --force
 ```
 
@@ -205,6 +205,6 @@ You can also just run `npm run monitor:watch` on any machine with the dispatcher
 
 **Dispatcher always says "skipped, user-active"** — by design. Activity gate wants 20+ min of no input. Leave the machine alone and it will fire. For manual test, use `--force`.
 
-**Pause all dispatches immediately** — `New-Item -ItemType File C:\Users\<you>\DevProjects\claude-budget-dispatcher\config\PAUSED`. Remove the file to resume.
+**Pause all dispatches immediately** — `New-Item -ItemType File C:\Users\<you>\DevProjects\budget-dispatcher\config\PAUSED`. Remove the file to resume.
 
 **Stop this machine from dispatching permanently** — `Disable-ScheduledTask -TaskName 'BudgetDispatcher-Node'` (admin PowerShell).

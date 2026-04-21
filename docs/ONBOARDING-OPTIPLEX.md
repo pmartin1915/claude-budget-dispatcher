@@ -69,8 +69,8 @@ Pick a folder you want to live in. This guide uses `C:\Users\<you>\DevProjects\`
 ```powershell
 mkdir C:\Users\<you>\DevProjects
 cd C:\Users\<you>\DevProjects
-git clone https://github.com/pmartin1915/claude-budget-dispatcher
-cd claude-budget-dispatcher
+git clone https://github.com/pmartin1915/budget-dispatcher
+cd budget-dispatcher
 ```
 
 Then run the automated setup. It does: `git pull`, `npm install`, prompts for API keys and saves them to your user env vars, registers the Windows Scheduled Task, and fires a dry test.
@@ -109,7 +109,7 @@ In Notepad, make these changes:
 
 4. **Do NOT** add a `worldbuilder` entry. Perry has the real worldbuilder under active hand-authoring on the PC and Gemini must not touch it.
 
-5. **Optional — share phone alerts.** If you want Optiplex alerts to go to the same phone, copy the `alerting` block from PC's `C:\Users\perry\DevProjects\claude-budget-dispatcher\config\budget.json` (topic + enabled: true). Otherwise leave it disabled — PC already alerts.
+5. **Optional — share phone alerts.** If you want Optiplex alerts to go to the same phone, copy the `alerting` block from PC's `C:\Users\perry\DevProjects\budget-dispatcher\config\budget.json` (topic + enabled: true). Otherwise leave it disabled — PC already alerts.
 
 Save and close Notepad.
 
@@ -142,7 +142,7 @@ Confirm paths in `config/budget.json` match where you cloned them.
 Back in the dispatcher repo:
 
 ```powershell
-cd C:\Users\<you>\DevProjects\claude-budget-dispatcher
+cd C:\Users\<you>\DevProjects\budget-dispatcher
 node scripts\dispatch.mjs --force
 ```
 
@@ -196,4 +196,4 @@ If you see recent `last_run_ts` and `consecutive_errors: 0`, it's working.
 
 **Dispatcher always says "skipped, user-active"** — by design. The activity gate wants 20+ min of no keyboard/mouse. Leave the machine alone and it will fire. For a manual test, use `node scripts\dispatch.mjs --force` (bypasses that gate only; does not bypass budget).
 
-**Want to pause all dispatches** — `New-Item -ItemType File C:\Users\<you>\DevProjects\claude-budget-dispatcher\config\PAUSED`. Remove the file to resume.
+**Want to pause all dispatches** — `New-Item -ItemType File C:\Users\<you>\DevProjects\budget-dispatcher\config\PAUSED`. Remove the file to resume.

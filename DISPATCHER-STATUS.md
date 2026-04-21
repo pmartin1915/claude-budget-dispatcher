@@ -6,7 +6,7 @@
 
 ## What this system does
 
-The **claude-budget-dispatcher** fires every 20 minutes via Windows Task Scheduler. When you've been idle for 20+ minutes, it picks a project and task from your rotation, does bounded work (tests, audits, docs, codegen), commits to a throwaway `auto/` branch, and logs the result. You review and merge (or discard) later.
+The **budget-dispatcher** fires every 20 minutes via Windows Task Scheduler. When you've been idle for 20+ minutes, it picks a project and task from your rotation, does bounded work (tests, audits, docs, codegen), commits to a throwaway `auto/` branch, and logs the result. You review and merge (or discard) later.
 
 There are **two engines** that can run the pipeline. They share the same wrapper (`run-dispatcher.ps1`), the same config (`config/budget.json`), the same activity gate, and the same projects. They differ in what does the thinking.
 

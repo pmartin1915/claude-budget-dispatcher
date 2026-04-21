@@ -39,7 +39,7 @@ Phases 1 and 2 are the fail-fast gate. If either one says "not now," the wrapper
   standalone install:
   - npm global: `C:\Users\<username>\AppData\Roaming\npm\claude.cmd`
   - Homebrew (macOS): `/usr/local/bin/claude` or `~/.local/bin/claude`
-- `claude-budget-dispatcher` repo cloned with `config/budget.json` populated
+- `budget-dispatcher` repo cloned with `config/budget.json` populated
 
 ### Pre-production verification
 
@@ -70,7 +70,7 @@ Save the resolved path — you'll need it for the Task Scheduler registration.
 With `"paused": true` set in `config/budget.json`, run the wrapper once from an interactive PowerShell window:
 
 ```powershell
-cd C:\Users\perry\DevProjects\claude-budget-dispatcher
+cd C:\Users\perry\DevProjects\budget-dispatcher
 .\scripts\run-dispatcher.ps1 -RepoRoot (Get-Location).Path
 ```
 
@@ -203,7 +203,7 @@ Log files accumulate at a rate of ~72/day (one per scheduled invocation). Roughl
 
 Run the estimator directly from the same working directory to see its error:
 ```powershell
-cd C:\Users\perry\DevProjects\claude-budget-dispatcher
+cd C:\Users\perry\DevProjects\budget-dispatcher
 node scripts/estimate-usage.mjs
 ```
 Most common cause: `config/budget.json` is missing or malformed. Copy from `config/budget.example.json` and re-edit.

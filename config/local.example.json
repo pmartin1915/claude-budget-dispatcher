@@ -22,6 +22,6 @@
   ],
 
   "kill_switches": {
-    "pause_file": "c:/Users/YOUR_USERNAME/DevProjects/claude-budget-dispatcher/config/PAUSED"
+    "pause_file": "c:/Users/YOUR_USERNAME/DevProjects/budget-dispatcher/config/PAUSED"
   }
 }

@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   Steps:
-    1. Pulls latest claude-budget-dispatcher from origin
+    1. Pulls latest budget-dispatcher from origin
     2. Installs Node dependencies (@google/genai, @mistralai/mistralai)
     3. Prompts for API keys and sets them as system env vars
     4. Registers a Windows Scheduled Task that runs dispatch.mjs every 20 min
@@ -16,7 +16,7 @@
   See ai/DECISIONS.md entry on PS1 encoding.
 
 .PARAMETER RepoRoot
-  Path to claude-budget-dispatcher repo. Default: script's grandparent dir.
+  Path to budget-dispatcher repo. Default: script's grandparent dir.
 
 .EXAMPLE
   .\setup-pc.ps1

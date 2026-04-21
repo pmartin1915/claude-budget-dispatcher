@@ -3,7 +3,7 @@
 Paste this into the next Claude Code session (laptop or any machine):
 
 ~~~
-Resume claude-budget-dispatcher.
+Resume budget-dispatcher.
 
 ## Required reading (in order)
 

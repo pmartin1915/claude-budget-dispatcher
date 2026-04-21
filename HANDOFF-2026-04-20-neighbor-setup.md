@@ -24,7 +24,7 @@ One known degraded condition: **no distributed lock** (GITHUB_TOKEN not set for 
 | git identity set (PerryHMartin / pmartin1913@gmail.com) | ✓ |
 | GEMINI_API_KEY saved to User env vars | ✓ (key: Neighbor_optiplex_key, account pmartin1912@gmail.com) |
 | MISTRAL_API_KEY saved to User env vars | ✓ (key: Neighbor_optiplex_mistral_key, same account) |
-| Repo cloned to C:\Users\Perry\DevProjects\claude-budget-dispatcher | ✓ |
+| Repo cloned to C:\Users\Perry\DevProjects\budget-dispatcher | ✓ |
 | npm install --production | ✓ (50 packages, 1 critical vuln — pre-existing, non-blocking) |
 | Scheduled task BudgetDispatcher-Node registered (every 20 min, auto engine) | ✓ |
 | config/budget.json created | ✓ |
@@ -44,7 +44,7 @@ Git:              2.51.2.windows.1
 gh:               2.90.0 (installed to C:\Program Files\GitHub CLI)
 npm:              11.6.1
 
-Repo:             C:\Users\Perry\DevProjects\claude-budget-dispatcher  (origin/main, up to date)
+Repo:             C:\Users\Perry\DevProjects\budget-dispatcher  (origin/main, up to date)
 Sandbox repos:    C:\Users\Perry\DevProjects\sandbox\
                     extra-sub-standalone-canary-test
                     extra-sub-standalone-biz-app
@@ -122,7 +122,7 @@ Healthy state: `consecutive_errors: 0`, `last_dispatch_outcome: success`, `last_
 You are a Claude Code instance on the "neighbor" machine (DESKTOP-TOJGBG2, user Perry).
 This machine is a live budget dispatcher node in Perry's free-tier fleet.
 
-Read: C:\Users\Perry\DevProjects\claude-budget-dispatcher\HANDOFF-2026-04-20-neighbor-setup.md
+Read: C:\Users\Perry\DevProjects\budget-dispatcher\HANDOFF-2026-04-20-neighbor-setup.md
 
 Current state: machine is fully set up and reporting to gist 655d02ce. Scheduled task
 BudgetDispatcher-Node fires every 20 min (auto engine). Last dispatch: success
@@ -135,7 +135,7 @@ Known open items (priority order):
 4. Gemini 429s on new key — monitor; should self-resolve in a few hours
 
 Repos on this machine:
-  C:\Users\Perry\DevProjects\claude-budget-dispatcher   (dispatcher)
+  C:\Users\Perry\DevProjects\budget-dispatcher   (dispatcher)
   C:\Users\Perry\DevProjects\sandbox\extra-sub-standalone-canary-test
   C:\Users\Perry\DevProjects\sandbox\extra-sub-standalone-biz-app
   C:\Users\Perry\DevProjects\sandbox\extra-sub-standalone-dnd-game

@@ -1,6 +1,6 @@
 # Operator Guide
 
-Complete reference for installing, configuring, tuning, and troubleshooting claude-budget-dispatcher.
+Complete reference for installing, configuring, tuning, and troubleshooting budget-dispatcher.
 
 ---
 
@@ -137,7 +137,7 @@ Add this to each project's DISPATCH.md:
 ```markdown
 ## Opportunistic Lane (Budget Dispatcher)
 
-The claude-budget-dispatcher may run the following pre-approved tasks
+The budget-dispatcher may run the following pre-approved tasks
 autonomously when the user is away and budget headroom exists.
 
 **Eligible:** test, typecheck, audit, clean
@@ -167,7 +167,7 @@ to origin.
 
 ### macOS (launchd)
 
-Write a plist at `~/Library/LaunchAgents/com.pmartin1915.claude-budget-dispatcher.plist`:
+Write a plist at `~/Library/LaunchAgents/com.pmartin1915.budget-dispatcher.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -175,12 +175,12 @@ Write a plist at `~/Library/LaunchAgents/com.pmartin1915.claude-budget-dispatche
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.pmartin1915.claude-budget-dispatcher</string>
+    <string>com.pmartin1915.budget-dispatcher</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>cd /path/to/claude-budget-dispatcher &amp;&amp; node scripts/estimate-usage.mjs &amp;&amp; claude -p "$(cat tasks/budget-dispatch.md)"</string>
+        <string>cd /path/to/budget-dispatcher &amp;&amp; node scripts/estimate-usage.mjs &amp;&amp; claude -p "$(cat tasks/budget-dispatch.md)"</string>
     </array>
     <key>StartInterval</key>
     <integer>1200</integer>
@@ -188,11 +188,11 @@ Write a plist at `~/Library/LaunchAgents/com.pmartin1915.claude-budget-dispatche
 </plist>
 ```
 
-Load: `launchctl load ~/Library/LaunchAgents/com.pmartin1915.claude-budget-dispatcher.plist`
+Load: `launchctl load ~/Library/LaunchAgents/com.pmartin1915.budget-dispatcher.plist`
 
 ### Linux (systemd timer)
 
-Create `~/.config/systemd/user/claude-budget-dispatcher.service`:
+Create `~/.config/systemd/user/budget-dispatcher.service`:
 
 ```ini
 [Unit]
@@ -200,12 +200,12 @@ Description=Claude Budget Dispatcher
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/claude-budget-dispatcher
+WorkingDirectory=%h/budget-dispatcher
 ExecStart=/usr/bin/env node scripts/estimate-usage.mjs
 ExecStart=/usr/bin/env claude -p @tasks/budget-dispatch.md
 ```
 
-And `~/.config/systemd/user/claude-budget-dispatcher.timer`:
+And `~/.config/systemd/user/budget-dispatcher.timer`:
 
 ```ini
 [Unit]
@@ -219,7 +219,7 @@ OnUnitActiveSec=20min
 WantedBy=timers.target
 ```
 
-Enable: `systemctl --user enable --now claude-budget-dispatcher.timer`
+Enable: `systemctl --user enable --now budget-dispatcher.timer`
 
 ---
 
