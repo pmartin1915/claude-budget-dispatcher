@@ -272,13 +272,17 @@ export async function verifyAndCommit(workResult, selection, route, config, clie
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
 
+  const diffStat = parseDiffStat(worktreePath);
+
   return {
     outcome: "success",
     project: selection.project,
     task: selection.task,
     branch: workResult.worktree.branch,
     commit_hash: hash,
-    files_changed: workResult.filesChanged?.length ?? 0,
+    files_changed: diffStat.files_changed,
+    lines_added: diffStat.lines_added,
+    lines_removed: diffStat.lines_removed,
     delegate_to: route.model ?? "local",
     summary,
   };
@@ -287,6 +291,37 @@ export async function verifyAndCommit(workResult, selection, route, config, clie
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Run `git diff --numstat HEAD~1` and parse the machine-readable output.
+ * Returns { files_changed, lines_added, lines_removed }.
+ * Binary files count toward files_changed but not lines.
+ * Returns zeros on any error (defense-in-depth).
+ */
+function parseDiffStat(worktreePath) {
+  const empty = { files_changed: 0, lines_added: 0, lines_removed: 0 };
+  try {
+    const raw = execFileSync("git", ["diff", "--numstat", "HEAD~1"], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (!raw) return empty;
+    let files = 0, added = 0, removed = 0;
+    for (const line of raw.split("\n")) {
+      const parts = line.split("\t");
+      if (parts.length < 3) continue;
+      files++;
+      // Binary files show "-\t-\tpath" — count file but not lines
+      if (parts[0] !== "-") added += parseInt(parts[0], 10) || 0;
+      if (parts[1] !== "-") removed += parseInt(parts[1], 10) || 0;
+    }
+    return { files_changed: files, lines_added: added, lines_removed: removed };
+  } catch {
+    return empty;
+  }
+}
 
 function getChangedFiles(worktreePath) {
   try {
