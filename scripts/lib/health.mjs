@@ -1,10 +1,15 @@
 // Dispatcher health summary. Reads the JSONL log and reports whether
 // the dispatcher is producing successful commits.
 //
-// State rules (three-state):
-//   down     -> consecutive_errors >= 3
-//   idle     -> hours_since_success > 6 AND recent entries are skips (not errors)
-//   healthy  -> otherwise
+// State rules (four-state, highest wins):
+//   down      -> consecutive_errors >= 3 OR hours_since_success > 6 with non-benign skips
+//   degraded  -> structural_failures >= DEGRADED_THRESHOLD in last DEGRADED_WINDOW cycles
+//   idle      -> hours_since_success > 6 AND recent entries are all benign skips
+//   healthy   -> otherwise
+//
+// "degraded" catches silent structural failures (selector-failed, router-failed)
+// that the old three-state model collapsed into "idle". Phase 2 of
+// PLAN-smooth-error-handling-and-auto-update.md.
 //
 // A "success" is a real dispatch that produced a commit on an auto/ branch
 // (outcome === "success"). Reverts, errors, skips, and dry-runs do NOT
@@ -16,6 +21,27 @@ import { fileURLToPath } from "node:url";
 const REAL_OUTCOMES = new Set(["success", "error", "reverted", "skipped", "dry-run"]);
 const DOWN_ERROR_STREAK = 3;
 const DOWN_HOURS_WITHOUT_SUCCESS = 6;
+const DEGRADED_WINDOW = 6;
+const DEGRADED_THRESHOLD = 3;
+
+// Benign skips: the dispatcher chose not to work (legitimate, not broken).
+// Structural skips: the dispatcher tried to work and broke.
+// IMPORTANT: if you add a new gate skip reason in dispatch.mjs, add it here
+// too. Otherwise the new reason will be misclassified as structural and
+// trigger false "degraded" alerts.
+const BENIGN_SKIP_REASONS = new Set([
+  "user-active",
+  "paused",
+  "budget-below-headroom",
+  "weekly-reserve-floor-threatened",
+  "trailing30-headroom-below-trigger",
+  "daily-quota-reached",
+  "dispatch-locked",
+  "estimator-snapshot-parse-error",
+  "no-eligible-projects",
+  "insufficient-history-for-bootstrap",
+  "insufficient-history-span",
+]);
 
 function parseLines(raw) {
   // Split on LF or CRLF. PowerShell's Add-Content writes CRLF on Windows;
@@ -57,13 +83,34 @@ export function computeHealth(logPath) {
     ? (Date.now() - new Date(lastSuccessTs).getTime()) / 3_600_000
     : null;
 
-  // Check if recent entries are all skips (no errors) — indicates idle, not broken.
-  let recentAllSkips = false;
-  const tail = real.slice(-5);
-  if (tail.length > 0 && tail.every((e) => e.outcome === "skipped" || e.outcome === "dry-run")) {
-    recentAllSkips = true;
+  // Classify recent skips: benign (chose not to work) vs structural (tried and broke).
+  // A skip is structural only if it has a reason AND that reason is NOT benign.
+  // Skips with no reason (legacy log entries, dry-runs) are treated as benign.
+  const isStructuralSkip = (e) =>
+    e.outcome === "skipped" && e.reason && !BENIGN_SKIP_REASONS.has(e.reason);
+  const isBenignSkipOrDryRun = (e) =>
+    e.outcome === "dry-run" ||
+    (e.outcome === "skipped" && (!e.reason || BENIGN_SKIP_REASONS.has(e.reason)));
+
+  const tail = real.slice(-DEGRADED_WINDOW);
+  const recentStructuralSkips = tail.filter(isStructuralSkip).length;
+  // recentAllBenign: the tail contains ONLY benign skips/dry-runs (no errors,
+  // no reverts, no structural skips). If there are errors mixed in, this is
+  // NOT an idle state — it's potentially down.
+  const recentAllBenign = tail.length > 0 && tail.every(
+    (e) => isBenignSkipOrDryRun(e) || e.outcome === "success"
+  );
+
+  // Find the most recent structural failure for the alert body
+  let lastStructuralFailure = null;
+  for (let i = real.length - 1; i >= 0; i--) {
+    if (isStructuralSkip(real[i])) {
+      lastStructuralFailure = real[i];
+      break;
+    }
   }
 
+  // State determination (highest priority wins)
   let state = "healthy";
   let reason = "ok";
 
@@ -71,7 +118,7 @@ export function computeHealth(logPath) {
     state = "down";
     reason = `${consecutiveErrors} consecutive errors`;
   } else if (hoursSinceSuccess !== null && hoursSinceSuccess > DOWN_HOURS_WITHOUT_SUCCESS) {
-    if (recentAllSkips) {
+    if (recentAllBenign) {
       state = "idle";
       reason = `no work found in ${hoursSinceSuccess.toFixed(1)}h`;
     } else {
@@ -79,7 +126,7 @@ export function computeHealth(logPath) {
       reason = `no successful dispatch in ${hoursSinceSuccess.toFixed(1)}h`;
     }
   } else if (lastSuccessTs === null && real.length > 20) {
-    if (recentAllSkips) {
+    if (recentAllBenign) {
       state = "idle";
       reason = "running but no dispatches yet";
     } else {
@@ -88,12 +135,30 @@ export function computeHealth(logPath) {
     }
   }
 
+  // Degraded: structural failures in the recent window, but not yet down.
+  // Only fires if we haven't already escalated to down.
+  if (state !== "down" && recentStructuralSkips >= DEGRADED_THRESHOLD) {
+    state = "degraded";
+    const failReason = lastStructuralFailure?.reason ?? "unknown";
+    const failDetail = lastStructuralFailure?.error_detail ?? "";
+    reason = `${recentStructuralSkips} structural failures in last ${tail.length} cycles` +
+      (failDetail ? ` (${failReason}: ${failDetail})` : ` (${failReason})`);
+  }
+
   return {
     state,
     reason,
     last_success_ts: lastSuccessTs,
     consecutive_errors: consecutiveErrors,
+    structural_failures: recentStructuralSkips,
     hours_since_success: hoursSinceSuccess,
+    last_structural_failure: lastStructuralFailure ? {
+      reason: lastStructuralFailure.reason,
+      detail: lastStructuralFailure.error_detail ?? null,
+      model: lastStructuralFailure.error_model ?? null,
+      message: lastStructuralFailure.error_message ?? null,
+      ts: lastStructuralFailure.ts,
+    } : null,
     computed_at: new Date().toISOString(),
   };
 }

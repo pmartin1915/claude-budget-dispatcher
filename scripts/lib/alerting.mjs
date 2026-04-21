@@ -105,13 +105,24 @@ export async function checkAndAlert(config) {
   let sent = false;
 
   // State transition alert
-  const onTransitions = alertConfig.on_transitions ?? ["down"];
+  const onTransitions = alertConfig.on_transitions ?? ["down", "degraded"];
   if (prevState && prevState !== health.state && onTransitions.includes(health.state)) {
-    const priority = health.state === "down" ? 4 : 3;
+    const priority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
+
+    // Build a rich body for degraded/down alerts with failure details
+    let body = `${prevState} -> ${health.state}: ${health.reason}`;
+    const sf = health.last_structural_failure;
+    if (sf) {
+      body += `\nmodel=${sf.model ?? "unknown"}`;
+      if (sf.detail) body += ` detail=${sf.detail}`;
+      if (sf.message) body += `\nerror="${sf.message.slice(0, 200)}"`;
+      body += `\nat ${sf.ts}`;
+    }
+
     sent = await sendNtfy(
       topic,
       `Dispatcher ${health.state} on ${host}`,
-      `${prevState} -> ${health.state}: ${health.reason}`,
+      body,
       priority,
     );
   }
