@@ -717,12 +717,19 @@ async function callModelThrottled(clients, providerConfig, model, prompt) {
  * @returns {Promise<{ text: string, model: string }>}
  */
 async function callModelWithFallback(clients, providerConfig, candidates, prompt) {
+  // Inject real date so models don't hallucinate timestamps from training cutoff.
+  // Gemini has written "Analysis Date: 2024-10-27" and "2026-04-14" for outputs
+  // generated weeks later — the LLM anchors on file mtimes or its own prior.
+  const datedPrompt =
+    `Today's date is ${new Date().toISOString().slice(0, 10)} (UTC). ` +
+    `Use this when writing any "Date:" or "As of:" line in your output.\n\n` +
+    prompt;
   let lastError;
   const MAX_RETRIES = 2; // per candidate, before advancing to next
   for (const model of candidates) {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const text = await callModelThrottled(clients, providerConfig, model, prompt);
+        const text = await callModelThrottled(clients, providerConfig, model, datedPrompt);
         return { text, model };
       } catch (e) {
         lastError = e;
