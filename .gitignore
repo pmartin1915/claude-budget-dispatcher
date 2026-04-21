@@ -13,6 +13,8 @@ status/budget-dispatch-log.jsonl
 status/budget-dispatch-last-run.json
 status/health.json
 status/fleet-*.json
+status/alerting-state.json
+status/merge-tracker.json
 
 # Weekly maintenance marker files (C-4 git fsck, S-8 npm audit)
 status/last-*.txt
