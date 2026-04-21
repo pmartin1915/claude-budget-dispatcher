@@ -4,9 +4,10 @@
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@google/genai";
-import { buildProjectContext } from "./context.mjs";
+import { buildProjectContext, getRecentDispatches } from "./context.mjs";
 import { extractJson } from "./extract-json.mjs";
 import { throttleFor } from "./throttle.mjs";
+import { TASK_TO_CLASS } from "./router.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_PATH = resolve(__dirname, "..", "..", "status", "budget-dispatch-log.jsonl");
@@ -49,14 +50,17 @@ export async function selectProjectAndTask(config, clients) {
     return null;
   }
 
-  // Cooldown filter: prevent the selector LLM from re-picking a project it
-  // just attempted. Without this, the LLM can fixate on a project whose
-  // STATE.md is richer than peers and fabricate a Rule-2-flavored justification
-  // ("oldest last dispatch") while repeatedly picking the most-recent one.
-  // Falls back to the full set if the filter would leave nothing eligible.
+  // -----------------------------------------------------------------------
+  // Structural diversity enforcement (deterministic, not LLM-dependent)
+  // -----------------------------------------------------------------------
+
+  const recentDispatches = getRecentDispatches(LOG_PATH, 8);
+  const now = Date.now();
   const cooldownMinutes = config.selector_cooldown_minutes ?? 20;
   const cooldownMs = cooldownMinutes * 60_000;
-  const now = Date.now();
+
+  // 1. Project cooldown: exclude projects attempted within cooldown window.
+  //    Falls back to full set if filter would leave nothing.
   const cooledDown = contexts.filter((ctx) => {
     if (!ctx.last_attempted || ctx.last_attempted === "never") return true;
     const age = now - new Date(ctx.last_attempted).getTime();
@@ -71,7 +75,55 @@ export async function selectProjectAndTask(config, clients) {
     console.log(`[selector] cooldown excluded (${cooldownMinutes}m): ${excluded}`);
   }
 
-  const prompt = buildSelectorPrompt(selectorContexts);
+  // 2. Task-class cooldown: count recent task classes across ALL projects.
+  //    If a class was used N+ times in the last 8 dispatches, remove those
+  //    tasks from every project's allowed list. Falls back if nothing remains.
+  const taskClassRepeatLimit = config.task_class_repeat_limit ?? 2;
+  const recentClassCounts = {};
+  for (const d of recentDispatches) {
+    const cls = TASK_TO_CLASS[d.task] ?? "unknown";
+    recentClassCounts[cls] = (recentClassCounts[cls] || 0) + 1;
+  }
+  const overusedClasses = new Set(
+    Object.entries(recentClassCounts)
+      .filter(([, count]) => count >= taskClassRepeatLimit)
+      .map(([cls]) => cls)
+  );
+
+  if (overusedClasses.size > 0) {
+    let anyFiltered = false;
+    for (const ctx of selectorContexts) {
+      // Snapshot the already-vetted list (respects NEEDS_SRC filter from
+      // buildProjectContext). Fallback must restore this, NOT the raw config
+      // list, to avoid re-introducing tasks that would always fail.
+      const viableTasks = [...ctx.opportunistic_tasks];
+      ctx.opportunistic_tasks = viableTasks.filter(
+        (t) => !overusedClasses.has(TASK_TO_CLASS[t] ?? "unknown")
+      );
+      if (ctx.opportunistic_tasks.length < viableTasks.length) anyFiltered = true;
+      // Never leave a project with zero tasks — restore the vetted list
+      if (ctx.opportunistic_tasks.length === 0) {
+        ctx.opportunistic_tasks = viableTasks;
+      }
+    }
+    if (anyFiltered) {
+      console.log(
+        `[selector] task-class cooldown: ${[...overusedClasses].join(", ")} ` +
+        `hit ${taskClassRepeatLimit}x in last ${recentDispatches.length} dispatches`
+      );
+    }
+  }
+
+  // 3. Build a diversity hint for the prompt showing what was recently dispatched
+  //    so the LLM can make informed choices from the remaining options.
+  const diversityHint = recentDispatches.length > 0
+    ? recentDispatches
+        .slice(0, 6)
+        .map((d) => `- ${d.project} / ${d.task} @ ${d.ts}`)
+        .join("\n")
+    : "(no recent dispatches)";
+
+  const prompt = buildSelectorPrompt(selectorContexts, diversityHint);
   // Default to gemini-2.5-flash: (1) supports thinkingBudget: 0 (pro does not,
   // rejects with INVALID_ARGUMENT), (2) better free-tier rate limits, (3) less
   // subject to pro's high-demand 503 spikes. Selector task is structured
@@ -145,6 +197,23 @@ export async function selectProjectAndTask(config, clients) {
     return null;
   }
 
+  // Post-selection diversity guard: if the LLM picked a (project, task) pair
+  // that matches one of the last 3 dispatches, log a warning. The structural
+  // task-class filter above should have prevented this, but the LLM may pick
+  // a different task keyword in the same class, or the filter may have fallen
+  // back. This is observability, not a hard block — the structural filter is
+  // the real enforcement.
+  const recentPairs = recentDispatches.slice(0, 3);
+  const isRepeat = recentPairs.some(
+    (d) => d.project === selection.project && d.task === selection.task
+  );
+  if (isRepeat) {
+    console.warn(
+      `[selector] WARNING: picked recently-dispatched pair ` +
+      `${selection.project}/${selection.task} — structural filter may have fallen back`
+    );
+  }
+
   return {
     project: selection.project,
     task: selection.task,
@@ -156,9 +225,10 @@ export async function selectProjectAndTask(config, clients) {
 /**
  * Build the constrained selector prompt.
  * @param {object[]} contexts - Project context objects from buildProjectContext
+ * @param {string} diversityHint - Recent dispatch history for diversity awareness
  * @returns {string}
  */
-function buildSelectorPrompt(contexts) {
+function buildSelectorPrompt(contexts, diversityHint) {
   const projectBlocks = contexts
     .map(
       (ctx) => `### ${ctx.slug}
@@ -189,6 +259,7 @@ ${ctx.merge_rate}`
   return `You are the project/task selector for an automated budget dispatcher.
 
 Given these projects and their current state, pick ONE project and ONE task.
+DIVERSITY IS CRITICAL. The operator reviews output and will reject repetitive work.
 
 ## Rules (in priority order)
 1. Failing tests or typecheck errors -> highest priority
@@ -199,8 +270,13 @@ Given these projects and their current state, pick ONE project and ONE task.
 6. If has_source_files is false: DO NOT pick docs-gen, tests-gen, session-log, jsdoc, refactor, add-tests, or clean — these tasks need src/ files and will always skip without them. Pick explore, research, audit, self-audit, or roadmap-review instead (these use git history).
 7. Avoid tasks that failed or were reverted in the last 2 consecutive attempts -- pick a different task or project instead.
 7b. Avoid tasks that were SKIPPED 3+ consecutive times with the SAME reason (e.g. "no-files-to-analyze") -- the outcome is deterministic and will keep skipping. Pick a different task for that project, or a different project entirely.
-8. Prefer (project, taskClass) combinations with higher merge rates. A higher merge rate means Perry found that work useful. A 0% rate with many branches means the work is being ignored -- try a different task class. Ignore this rule if no merge data is available yet.
-9. If all projects were recently dispatched and have no urgent issues, pick the one with the most impactful available task
+8. NEVER pick the same task keyword that appears in the "Recent Dispatches" list below. Pick a DIFFERENT task keyword. If every task on a project was recently dispatched, pick a different project.
+9. Prefer (project, taskClass) combinations with higher merge rates. A higher merge rate means Perry found that work useful. A 0% rate with many branches means the work is being ignored -- try a different task class. Ignore this rule if no merge data is available yet.
+10. If all projects were recently dispatched and have no urgent issues, pick the one with the most impactful available task that was NOT recently dispatched.
+
+## Recent Dispatches (do NOT repeat these task keywords)
+
+${diversityHint}
 
 ## Projects
 

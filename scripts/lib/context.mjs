@@ -191,6 +191,42 @@ export function getRecentOutcomes(slug, logPath, maxResults = 5) {
 }
 
 /**
+ * Get the last N dispatched (project, task) pairs from the JSONL log.
+ * Used by the selector to structurally exclude recently-used task classes.
+ * @param {string} logPath - Path to budget-dispatch-log.jsonl
+ * @param {number} [maxResults=6] - How many recent dispatches to return
+ * @returns {Array<{ project: string, task: string, ts: string }>}
+ */
+export function getRecentDispatches(logPath, maxResults = 6) {
+  if (!existsSync(logPath)) return [];
+
+  let lines;
+  try {
+    lines = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+
+  const results = [];
+  for (let i = lines.length - 1; i >= 0 && results.length < maxResults; i--) {
+    try {
+      const obj = JSON.parse(lines[i]);
+      // Only count entries that reached the worker (not gate skips)
+      if (obj.project && obj.task && obj.phase === "complete") {
+        results.push({
+          project: obj.project,
+          task: obj.task,
+          ts: obj.ts,
+        });
+      }
+    } catch {
+      // skip corrupt line
+    }
+  }
+  return results;
+}
+
+/**
  * Read merge-tracker.json and format merge-rate context for a project.
  * Returns a human-readable summary for the selector prompt.
  * @param {string} slug - Project slug
