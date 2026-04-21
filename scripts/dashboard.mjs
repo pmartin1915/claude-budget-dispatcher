@@ -5,10 +5,11 @@
 
 import { createServer } from "node:http";
 import {
-  readFileSync, writeFileSync, existsSync, readdirSync,
+  readFileSync, writeFileSync, existsSync, readdirSync, statSync,
 } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { spawn, exec, execFileSync } from "node:child_process";
 
 import { resolveModel } from "./lib/router.mjs";
@@ -63,6 +64,76 @@ function countTodayRuns() {
 function esc(s) {
   if (typeof s !== "string") return String(s ?? "");
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// ---- Activity Info (transcript mtime scan) ----
+
+function getActivityInfo() {
+  const config = readJson(CONFIG_PATH);
+  const idleRequired = (config?.activity_gate?.idle_minutes_required ?? 20) * 60; // seconds
+  const root = join(homedir(), ".claude", "projects");
+  if (!existsSync(root)) return { last_activity_ms: null, idle_seconds: null, idle_required_seconds: idleRequired, is_idle: false };
+
+  let latestMtime = 0;
+  function walk(dir) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      try {
+        if (e.isDirectory()) walk(full);
+        else if (e.isFile() && e.name.endsWith(".jsonl")) {
+          const mt = statSync(full).mtimeMs;
+          if (mt > latestMtime) latestMtime = mt;
+        }
+      } catch { /* skip */ }
+    }
+  }
+  walk(root);
+
+  if (latestMtime === 0) return { last_activity_ms: null, idle_seconds: null, idle_required_seconds: idleRequired, is_idle: false };
+  const idleSec = Math.floor((Date.now() - latestMtime) / 1000);
+  return {
+    last_activity_ms: latestMtime,
+    idle_seconds: idleSec,
+    idle_required_seconds: idleRequired,
+    is_idle: idleSec >= idleRequired,
+  };
+}
+
+// ---- Auto Branches (origin/auto/* across rotation projects) ----
+
+function getAutoBranches() {
+  const config = readJson(CONFIG_PATH);
+  if (!config) return [];
+  const projects = config.projects_in_rotation ?? [];
+  const branches = [];
+
+  for (const proj of projects) {
+    if (!proj.path || !existsSync(proj.path)) continue;
+    try {
+      const raw = execFileSync("git", [
+        "branch", "-r", "--list", "origin/auto/*",
+        "--sort=-committerdate",
+        "--format=%(refname:short)|%(committerdate:iso-strict)|%(subject)",
+      ], { cwd: proj.path, timeout: 5000, encoding: "utf8", env: getSafeTestEnv() }).trim();
+      if (!raw) continue;
+      for (const line of raw.split(/\r?\n/).slice(0, 5)) {
+        const [branch, dateIso, ...subjectParts] = line.split("|");
+        if (!branch) continue;
+        branches.push({
+          branch: branch.replace("origin/", ""),
+          project: proj.slug,
+          date: dateIso,
+          subject: subjectParts.join("|"),
+        });
+      }
+    } catch { /* git not available or no remotes */ }
+  }
+
+  // Sort all by date desc, cap at 10
+  branches.sort((a, b) => new Date(b.date) - new Date(a.date));
+  return branches.slice(0, 10);
 }
 
 // ---- Scheduled Task Health (cached) ----
@@ -145,6 +216,7 @@ function getState() {
     max_runs_per_day: snapshot?.weekly?.effective_max_runs_per_day ?? config.max_runs_per_day ?? 8,
     today_runs: cachedTodayRuns.get(),
     activity_gate: config.activity_gate ?? {},
+    activity_info: cachedActivityInfo.get(),
     scheduled_task: getScheduledTaskInfo(),
     health: getCachedHealth(),
   };
@@ -355,6 +427,8 @@ const cachedPredict = createCachedFn(predict, 30_000);               // 30s
 const cachedTodayRuns = createCachedFn(countTodayRuns, 30_000);      // 30s
 const cachedBudgetDetail = createCachedFn(getBudgetDetail, 30_000);  // 30s
 const cachedProjects = createCachedFn(getProjects, 30_000);          // 30s
+const cachedActivityInfo = createCachedFn(getActivityInfo, 15_000);  // 15s (activity is time-sensitive)
+const cachedAutoBranches = createCachedFn(getAutoBranches, 120_000); // 2 min (git ops are slow)
 
 // ---- API: Budget Detail ----
 
@@ -713,6 +787,7 @@ const server = createServer(async (req, res) => {
     try { json(res, await getGistFleetData()); } catch (e) { json(res, { machines: [], error: e.message }); }
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/auto-branches") { json(res, cachedAutoBranches.get()); return; }
   if (req.method === "GET" && url.pathname === "/api/run-log") {
     const file = url.searchParams.get("file") || "";
     json(res, getRunLog(file));
@@ -1054,7 +1129,8 @@ const HTML_PAGE = `<!DOCTYPE html>
     <div id="budget-bars"></div>
     <div style="margin-top:6px">
       <div class="metric"><span class="label">Authorized</span><span class="value" id="s-auth">--</span></div>
-      <div class="metric"><span class="label">Reason</span><span class="value dim" id="s-reason">--</span></div>
+      <div class="metric"><span class="label">Reason</span><span class="value dim" id="s-reason" style="font-size:11px;max-width:600px">--</span></div>
+      <div class="metric"><span class="label">Activity</span><span class="value" id="s-activity" style="font-size:11px">--</span></div>
     </div>
   </div>
 
@@ -1148,7 +1224,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 <script>
 // ---- State ----
-let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null, fleetData = null, fleetRemote = null, analyticsData = null;
+let state = null, prediction = null, budgetDetail = null, projectsData = null, aboutData = null, fleetData = null, fleetRemote = null, fleetBranches = null, analyticsData = null;
 let logEntries = [], logOffset = 0, logTotal = 0;
 let currentTab = localStorage.getItem('dash-tab') || 'status';
 let refreshTimer = null;
@@ -1211,12 +1287,14 @@ async function fetchAbout() {
 
 async function fetchFleet() {
   try {
-    const [local, remote] = await Promise.all([
+    const [local, remote, branches] = await Promise.all([
       fetch('/api/fleet').then(r => r.json()),
       fetch('/api/fleet-remote').then(r => r.json()).catch(() => ({ machines: [], error: 'fetch failed' })),
+      fetch('/api/auto-branches').then(r => r.json()).catch(() => []),
     ]);
     fleetData = local;
     fleetRemote = remote;
+    fleetBranches = branches;
     renderFleet();
   } catch (e) { document.getElementById('fleet-content').textContent = 'Error: ' + e.message; }
 }
@@ -1237,6 +1315,65 @@ async function loadMoreLogs() {
     logOffset += data.entries.length;
     renderLogs(data.has_more);
   } catch (e) { document.getElementById('log-entries').textContent = 'Error: ' + e.message; }
+}
+
+// ---- Skip Reason Explainer ----
+function explainSkipReason(reason, budget, activityInfo) {
+  if (!reason) return null;
+  switch (reason) {
+    case 'user-active': {
+      if (activityInfo?.idle_seconds != null) {
+        const idleM = Math.floor(activityInfo.idle_seconds / 60);
+        const idleS = activityInfo.idle_seconds % 60;
+        const needM = Math.floor(activityInfo.idle_required_seconds / 60);
+        const remainSec = activityInfo.idle_required_seconds - activityInfo.idle_seconds;
+        const remM = Math.floor(remainSec / 60);
+        const remS = remainSec % 60;
+        return 'User active — idle ' + idleM + 'm ' + idleS + 's / need ' + needM + 'm. Can dispatch in ' + remM + 'm ' + remS + 's';
+      }
+      return 'User active — transcript mtime within idle threshold';
+    }
+    case 'weekly-reserve-floor-threatened': {
+      const wk = budget?.weekly;
+      if (wk) {
+        const used = (100 - (wk.headroom_pct || 0)).toFixed(1);
+        const floor = wk.effective_reserve_floor_pct ?? 20;
+        const deficit = (floor - (wk.headroom_pct || 0)).toFixed(1);
+        return 'Weekly reserve at ' + used + '% used — floor is ' + floor + '%, need ' + deficit + '% more headroom';
+      }
+      return 'Weekly reserve floor threatened';
+    }
+    case 'trailing30-headroom-below-trigger': {
+      const t = budget?.trailing30;
+      if (t) return '30-day headroom ' + (t.headroom_pct?.toFixed(1) || '?') + '% is below trigger threshold';
+      return '30-day headroom below trigger';
+    }
+    case 'daily-quota-reached':
+      return 'Daily quota reached — no more runs allowed today';
+    case 'insufficient-history-span':
+      return 'Not enough history — need 7+ days of transcript data';
+    case 'estimator-no-snapshot':
+      return 'No usage snapshot — run estimator first';
+    case 'estimator-parse-error':
+      return 'Estimator failed to parse transcripts';
+    default:
+      return reason;
+  }
+}
+
+// ---- Activity Countdown Formatter ----
+function renderActivityCountdown(activityInfo) {
+  if (!activityInfo || activityInfo.idle_seconds == null) return '<span class="dim">No transcript data</span>';
+  const idleM = Math.floor(activityInfo.idle_seconds / 60);
+  const idleS = activityInfo.idle_seconds % 60;
+  const needM = Math.floor(activityInfo.idle_required_seconds / 60);
+  if (activityInfo.is_idle) {
+    return '<span class="yes">Idle ' + idleM + 'm ' + idleS + 's — ready to dispatch</span>';
+  }
+  const remainSec = Math.max(0, activityInfo.idle_required_seconds - activityInfo.idle_seconds);
+  const remM = Math.floor(remainSec / 60);
+  const remS = remainSec % 60;
+  return '<span class="warn-c">Idle ' + idleM + 'm ' + idleS + 's / need ' + needM + 'm — can dispatch in ' + remM + 'm ' + remS + 's</span>';
 }
 
 // ---- Render: Status ----
@@ -1314,7 +1451,13 @@ function renderStatus() {
   const authEl = document.getElementById('s-auth');
   authEl.textContent = b?.dispatch_authorized ? 'YES' : 'NO';
   authEl.className = 'value ' + (b?.dispatch_authorized ? 'yes' : 'no');
-  document.getElementById('s-reason').textContent = b?.skip_reason || '--';
+  // "Why blocked?" explainer
+  const skipExplained = explainSkipReason(b?.skip_reason, b, state.activity_info);
+  document.getElementById('s-reason').textContent = skipExplained || '--';
+
+  // Activity countdown
+  const actEl = document.getElementById('s-activity');
+  if (actEl) actEl.innerHTML = renderActivityCountdown(state.activity_info);
 
   // Last run
   const lr = state.last_run;
@@ -1322,7 +1465,8 @@ function renderStatus() {
     const sEl = document.getElementById('lr-status');
     sEl.textContent = lr.status || '--';
     sEl.className = 'value ' + statusColor(lr.status);
-    document.getElementById('lr-reason').textContent = lr.error || lr.reason || '--';
+    const lrReason = lr.error || lr.reason || '--';
+    document.getElementById('lr-reason').textContent = lr.status === 'skipped' ? (explainSkipReason(lr.error, state.budget, state.activity_info) || lrReason) : lrReason;
     document.getElementById('lr-dur').textContent = lr.duration_ms != null ? lr.duration_ms + 'ms' : '--';
     document.getElementById('lr-time').textContent = lr.timestamp ? new Date(lr.timestamp).toLocaleString() : '--';
   }
@@ -1401,6 +1545,23 @@ function renderBudget() {
   html += '<div class="cfg-row"><span class="cfg-label">Urgency</span><span class="cfg-value">' + (wk.urgency_mode || 'normal') + '</span></div>';
   html += '<div class="cfg-row"><span class="cfg-label">Effective max/day</span><span class="cfg-value">' + (wk.effective_max_runs_per_day ?? '?') + '</span></div>';
   html += '<div class="cfg-row"><span class="cfg-label">Effective max%/run</span><span class="cfg-value">' + (wk.effective_max_pct_per_run ?? '?') + '</span></div>';
+  html += '</div>';
+
+  // Budget forecast
+  const dailyBurn = wk.actual_pct > 0 && wk.rolling_days > 0 ? wk.actual_pct / wk.rolling_days : 0;
+  const usableHeadroom = (wk.headroom_pct || 0) - (wk.effective_reserve_floor_pct || 20);
+  html += '<div class="card"><h2>Forecast</h2>';
+  if (dailyBurn <= 0) {
+    html += '<div class="cfg-row"><span class="cfg-label">Projection</span><span class="cfg-value yes">No burn detected — floor not threatened</span></div>';
+  } else if (usableHeadroom <= 0) {
+    html += '<div class="cfg-row"><span class="cfg-label">Projection</span><span class="cfg-value no">Reserve floor already reached</span></div>';
+  } else {
+    const daysLeft = (usableHeadroom / dailyBurn).toFixed(1);
+    const color = daysLeft > 7 ? 'yes' : daysLeft > 3 ? 'warn-c' : 'no';
+    html += '<div class="cfg-row"><span class="cfg-label">Projection</span><span class="cfg-value ' + color + '">Reserve floor in ~' + daysLeft + ' days at current pace</span></div>';
+  }
+  html += '<div class="cfg-row"><span class="cfg-label">Daily burn rate</span><span class="cfg-value">' + dailyBurn.toFixed(2) + '%/day</span></div>';
+  html += '<div class="cfg-row"><span class="cfg-label">Usable headroom</span><span class="cfg-value">' + usableHeadroom.toFixed(1) + '% above floor</span></div>';
   html += '</div>';
 
   // 7-day sparkline
@@ -1597,6 +1758,22 @@ function renderFleet() {
 
   // ---- Machines card (from gist) ----
   html += renderMachinesCard();
+
+  // ---- Auto branches card ----
+  html += '<div class="card"><h2>Auto Branches</h2>';
+  if (!fleetBranches || fleetBranches.length === 0) {
+    html += '<div class="dim">No auto/* branches on any remote</div>';
+  } else {
+    fleetBranches.forEach(b => {
+      const age = b.date ? timeAgo(new Date(b.date)) : '?';
+      html += '<div class="log-entry">';
+      html += '<span class="ts" style="width:80px;color:var(--cyan)">' + esc(b.project) + '</span>';
+      html += '<span class="outcome" style="width:auto;color:var(--accent);font-weight:400">' + esc(b.branch) + '</span>';
+      html += '<span class="info">' + esc(b.subject) + ' · ' + age + '</span>';
+      html += '</div>';
+    });
+  }
+  html += '</div>';
 
   html += '<div class="card">';
   html += '<h2>Fleet Progress</h2>';
