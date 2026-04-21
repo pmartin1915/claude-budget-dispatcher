@@ -49,7 +49,29 @@ export async function selectProjectAndTask(config, clients) {
     return null;
   }
 
-  const prompt = buildSelectorPrompt(contexts);
+  // Cooldown filter: prevent the selector LLM from re-picking a project it
+  // just attempted. Without this, the LLM can fixate on a project whose
+  // STATE.md is richer than peers and fabricate a Rule-2-flavored justification
+  // ("oldest last dispatch") while repeatedly picking the most-recent one.
+  // Falls back to the full set if the filter would leave nothing eligible.
+  const cooldownMinutes = config.selector_cooldown_minutes ?? 20;
+  const cooldownMs = cooldownMinutes * 60_000;
+  const now = Date.now();
+  const cooledDown = contexts.filter((ctx) => {
+    if (!ctx.last_attempted || ctx.last_attempted === "never") return true;
+    const age = now - new Date(ctx.last_attempted).getTime();
+    return Number.isFinite(age) && age >= cooldownMs;
+  });
+  const selectorContexts = cooledDown.length > 0 ? cooledDown : contexts;
+  if (selectorContexts.length < contexts.length) {
+    const excluded = contexts
+      .filter((c) => !selectorContexts.includes(c))
+      .map((c) => c.slug)
+      .join(", ");
+    console.log(`[selector] cooldown excluded (${cooldownMinutes}m): ${excluded}`);
+  }
+
+  const prompt = buildSelectorPrompt(selectorContexts);
   // Default to gemini-2.5-flash: (1) supports thinkingBudget: 0 (pro does not,
   // rejects with INVALID_ARGUMENT), (2) better free-tier rate limits, (3) less
   // subject to pro's high-demand 503 spikes. Selector task is structured
