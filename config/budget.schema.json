@@ -2,143 +2,316 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Budget Dispatcher Configuration",
   "type": "object",
-  "required": ["max_runs_per_day", "projects_in_rotation"],
+  "required": [
+    "max_runs_per_day",
+    "projects_in_rotation"
+  ],
   "properties": {
-    "paused": { "type": "boolean" },
-    "dry_run": { "type": "boolean" },
-    "status_gist_id": { "type": "string" },
-
+    "paused": {
+      "type": "boolean"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "status_gist_id": {
+      "type": "string"
+    },
     "alerting": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "provider": { "type": "string", "enum": ["ntfy"] },
-        "topic": { "type": "string", "minLength": 1 },
+        "enabled": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "ntfy"
+          ]
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1
+        },
         "on_transitions": {
           "type": "array",
-          "items": { "type": "string", "enum": ["down", "idle", "healthy"] }
+          "items": {
+            "type": "string",
+            "enum": [
+              "down",
+              "degraded",
+              "idle",
+              "healthy"
+            ]
+          }
         },
-        "heartbeat_hours": { "type": "number", "minimum": 0 }
+        "heartbeat_hours": {
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
-
     "trailing30_baseline": {
       "type": "object",
       "properties": {
-        "resets_on_day": { "type": "integer", "minimum": 1, "maximum": 28 },
-        "target_burn_pct_per_day": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
-        "reserve_floor_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "trigger_headroom_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+        "resets_on_day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 28
+        },
+        "target_burn_pct_per_day": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "reserve_floor_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "trigger_headroom_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
       }
     },
-
     "weekly": {
       "type": "object",
       "properties": {
-        "rolling_days": { "type": "integer", "minimum": 1, "maximum": 30 },
-        "reserve_floor_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "trigger_headroom_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "is_floor": { "type": "boolean" },
+        "rolling_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "reserve_floor_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "trigger_headroom_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "is_floor": {
+          "type": "boolean"
+        },
         "deadline_scaling": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "resets_on_day_of_week": { "type": "integer", "minimum": 0, "maximum": 6 },
-            "resets_at_hour_utc": { "type": "integer", "minimum": 0, "maximum": 23 },
+            "enabled": {
+              "type": "boolean"
+            },
+            "resets_on_day_of_week": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 6
+            },
+            "resets_at_hour_utc": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 23
+            },
             "ramp_steps": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["hours_before_reset"],
+                "required": [
+                  "hours_before_reset"
+                ],
                 "properties": {
-                  "hours_before_reset": { "type": "number", "minimum": 0 },
-                  "reserve_floor_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-                  "max_runs_per_day": { "type": "integer", "minimum": 1, "maximum": 100 },
-                  "max_pct_per_run": { "type": "number", "minimum": 0, "maximum": 100 }
+                  "hours_before_reset": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "reserve_floor_pct": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "max_runs_per_day": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "max_pct_per_run": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100
+                  }
                 }
               }
             },
-            "hard_minimum_reserve_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-            "interactive_reserve_hours": { "type": "number", "minimum": 0 }
+            "hard_minimum_reserve_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "interactive_reserve_hours": {
+              "type": "number",
+              "minimum": 0
+            }
           }
         }
       }
     },
-
-    "max_opportunistic_pct_per_run": { "type": "number", "minimum": 0, "maximum": 100 },
-    "max_runs_per_day": { "type": "integer", "minimum": 1, "maximum": 100 },
-
+    "max_opportunistic_pct_per_run": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "max_runs_per_day": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
     "activity_gate": {
       "type": "object",
       "properties": {
-        "idle_minutes_required": { "type": "integer", "minimum": 1 },
-        "no_fixed_hours": { "type": "boolean" }
+        "idle_minutes_required": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "no_fixed_hours": {
+          "type": "boolean"
+        }
       }
     },
-
     "free_model_roster": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "allow_only_listed_models": { "type": "boolean" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "allow_only_listed_models": {
+          "type": "boolean"
+        },
         "classes": {
           "type": "object",
           "additionalProperties": {
             "oneOf": [
-              { "type": "string" },
-              { "type": "array", "items": { "type": "string" } }
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             ]
           }
         },
-        "claude_only": { "type": "array", "items": { "type": "string" } },
-        "forbidden_models": { "type": "array", "items": { "type": "string" } },
-        "fallback_chain": { "type": "array", "items": { "type": "string" } },
-        "on_pal_error": { "type": "string", "enum": ["skip", "claude_fallback"] }
+        "claude_only": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbidden_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fallback_chain": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "on_pal_error": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "claude_fallback"
+          ]
+        }
       }
     },
-
-    "selector_model": { "type": "string" },
-    "selector_temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-    "selector_max_tokens": { "type": "integer", "minimum": 1 },
-
+    "selector_model": {
+      "type": "string"
+    },
+    "selector_temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "selector_max_tokens": {
+      "type": "integer",
+      "minimum": 1
+    },
     "token_weights": {
       "type": "object",
       "properties": {
-        "input_tokens": { "type": "number", "minimum": 0 },
-        "output_tokens": { "type": "number", "minimum": 0 },
-        "cache_creation_input_tokens": { "type": "number", "minimum": 0 },
-        "cache_read_input_tokens": { "type": "number", "minimum": 0 }
+        "input_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_creation_input_tokens": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read_input_tokens": {
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
-
     "projects_in_rotation": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["slug", "path"],
+        "required": [
+          "slug",
+          "path"
+        ],
         "properties": {
-          "slug": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$" },
-          "path": { "type": "string", "minLength": 1 },
-          "clinical_gate": { "type": "boolean" },
-          "sandbox": { "type": "boolean" },
-          "canary": { "type": "boolean" },
+          "slug": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "clinical_gate": {
+            "type": "boolean"
+          },
+          "sandbox": {
+            "type": "boolean"
+          },
+          "canary": {
+            "type": "boolean"
+          },
           "opportunistic_tasks": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "minItems": 1
           }
         }
       }
     },
-
-    "commit_policy": { "type": "string" },
-    "branch_prefix": { "type": "string" },
-
+    "commit_policy": {
+      "type": "string"
+    },
+    "branch_prefix": {
+      "type": "string"
+    },
     "kill_switches": {
       "type": "object",
       "properties": {
-        "pause_file": { "type": "string" }
+        "pause_file": {
+          "type": "string"
+        }
       }
     }
   },

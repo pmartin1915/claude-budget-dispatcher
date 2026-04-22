@@ -168,3 +168,42 @@ Session ending clean — no in-flight work, no open PRs from this session, no un
 ---
 
 **Perry — enjoy the 48h off-Claude. Phase 2 will page you if something new breaks. Existing degraded state will clear when the cooldown window rolls. If anything urgent, the gist is the source of truth.**
+
+---
+
+## Postscript (2026-04-22 ~10:15 CT / 15:15 UTC) — Claude Opus 4.7
+
+Returned to troubleshoot because ntfy *did* fire a `down` alert overnight (correctly, per Phase 2) and Perry suspected the dispatcher was stuck. Confirmed two distinct failure modes stacked on top of each other:
+
+### 1. Confirmed: original `task_not_allowed` loop resolved
+Perry (or prior session) had already added `typecheck` to `wilderness.opportunistic_tasks` in [config/local.json](config/local.json). The 14:57Z manual dry-run picked `wilderness/typecheck` cleanly, proving the allowlist fix landed. Good.
+
+### 2. **New latent bug: schema validation rejected the locally-edited shared.json**
+Between ~09:52Z (last successful wrapper exit) and 15:12Z the dispatch.mjs *phase* of every cycle silently started exiting with code 2. Root cause in [status/budget-dispatch-last-run.json](status/budget-dispatch-last-run.json):
+
+```
+budget.json schema validation failed:
+  /alerting/on_transitions/1: must be equal to one of the allowed values
+```
+
+Origin/main's [config/shared.json](config/shared.json) still ships `on_transitions: ["down"]`. Perrypc has an **uncommitted** local edit to shared.json changing it to `["down","degraded"]` and flipping `alerting.enabled` to `true` — clearly prior session work that never got committed. That uncommitted change is what exercises index 1 of the array. [config/budget.schema.json](config/budget.schema.json)'s enum was `["down","idle","healthy"]` — **`"degraded"` missing** — so ajv tripped on perrypc only. Neighbor/Optiplex are unaffected *until* shared.json is actually pushed with `"degraded"` in it.
+
+Net: the schema needed widening regardless (the `degraded` state exists in [scripts/lib/health.mjs](scripts/lib/health.mjs) and we want fleet-wide Phase 2 alerting eventually), but the trigger for perrypc specifically was the uncommitted shared.json edit meeting strict validation.
+
+**Net effect:** the `task_not_allowed` loop we were worried about was actually *self-healing* once `typecheck` was allowlisted — but a separate config-schema regression kept every cycle from even reaching the selector. The two symptoms looked the same from the health-state perspective (no dispatch success, down state persists) which is why the post-mortem needed the last-run JSON to disambiguate.
+
+### Fix applied
+- [config/budget.schema.json:19](config/budget.schema.json:19): added `"degraded"` to the `on_transitions` items enum. Minimal patch; also permits the state if any other fleet config starts relying on it.
+- [config/local.json](config/local.json): added `test`, `typecheck` to `combo` and `boardbound` `opportunistic_tasks` as a safety net against future loops. Perry-machine-only (gitignored).
+- Verified with `node scripts/dispatch.mjs --force --dry-run` — selector chose `sandbox-game-adventure/roadmap-review`; no schema error; exit 0.
+
+### Fleet implications
+- **neighbor (desktop-tojgbg2)** and **Optiplex (desktop-p7h5aj1)** are almost certainly broken the same way the moment they pulled `5c8ab80`. Once they pull the schema fix they will recover automatically on their next scheduled cycle. No action needed on those machines other than `git pull` — their local budget.json is a thin per-machine layer over shared.json.
+- Phase 2 `"on_transitions": ["down","degraded"]` now works fleet-wide since shared.json already ships that default and the schema allows it.
+
+### Alerting state
+Left [status/alerting-state.json](status/alerting-state.json) at `prev_state: "down"` intentionally. The next successful dispatch cycle will flip health to `healthy`, the alerting detector will see `down → healthy`, and ntfy will fire a recovery alert — end-to-end confirmation that Phase 2 works in both directions.
+
+### Lessons
+- The ajv validator and the state-machine source-of-truth got out of sync. Consider a test that asserts every transition name emitted by [scripts/lib/health.mjs](scripts/lib/health.mjs) is a valid enum value in the schema. Cheap future-proofing.
+- The handoff doc correctly predicted the `task_not_allowed` loop but missed that the underlying `dispatch-mjs-exit-2` had a separate, more fatal cause. Next time the wrapper JSONL shows no `selector-failed` entries but still shows `outcome=error`, suspect a pre-selector crash (config load, schema, module import) before blaming the selector.
