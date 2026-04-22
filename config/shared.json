@@ -41,7 +41,7 @@
   },
 
   "max_opportunistic_pct_per_run": 1.0,
-  "max_runs_per_day": 20,
+  "max_runs_per_day": 30,
 
   "activity_gate": {
     "idle_minutes_required": 20,
