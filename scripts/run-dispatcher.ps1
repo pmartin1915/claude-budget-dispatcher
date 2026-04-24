@@ -116,6 +116,64 @@ function Get-UtcTimestamp {
   return (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
 }
 
+function Send-FatalNtfy {
+  # 2026-04-24 confidence-building: wrapper-level ntfy for failures that
+  # kill dispatch.mjs before it can run alerting itself. checkAndAlert is
+  # imported and called FROM dispatch.mjs, so if dispatch.mjs fails to
+  # load (schema exit 2, import error) or times out hard, alerting never
+  # fires even though the JSONL gets a wrapper-written error entry. This
+  # function POSTs directly to ntfy.sh from the wrapper.
+  #
+  # Best-effort. Any failure here is logged and swallowed so we don't
+  # mask the original error the wrapper was reporting.
+  param(
+    [string]$Reason,
+    [string]$Phase,
+    [int]$ExitCode,
+    [int]$Attempts
+  )
+  try {
+    # Prefer topic from config/shared.json; fallback to the known value.
+    $topic = 'perry-dispatcher-alerts'
+    $sharedPath = Join-Path $RepoRoot 'config\shared.json'
+    if (Test-Path $sharedPath) {
+      try {
+        $sharedCfg = Get-Content $sharedPath -Raw | ConvertFrom-Json
+        if ($sharedCfg.alerting) {
+          if ($sharedCfg.alerting.topic) { $topic = $sharedCfg.alerting.topic }
+          if ($sharedCfg.alerting.enabled -eq $false) {
+            Write-Log "fatal-ntfy: alerting disabled in shared.json, skipping"
+            return
+          }
+        }
+      } catch {
+        Write-Log "fatal-ntfy: failed to parse shared.json ($_); using default topic" 'warn'
+      }
+    }
+
+    $hostName = [System.Net.Dns]::GetHostName().ToLower()
+    # Expandable here-string is safer than backtick-n concatenation for
+    # multi-line bodies; variables still expand as normal.
+    $body = @"
+Wrapper-level alert (dispatch.mjs could not run its own alerting).
+reason=$Reason
+phase=$Phase
+exit=$ExitCode
+attempts=$Attempts
+run_id=$RunId
+"@
+    $headers = @{
+      Title = "Dispatcher FATAL on $hostName"
+      Priority = '5'
+      Tags = 'rotating_light,warning'
+    }
+    $null = Invoke-RestMethod -Uri "https://ntfy.sh/$topic" -Method Post -Body $body -Headers $headers -TimeoutSec 10
+    Write-Log "fatal-ntfy: sent to topic=$topic"
+  } catch {
+    Write-Log "fatal-ntfy: send failed ($_); continuing" 'warn'
+  }
+}
+
 function Show-DispatchToast {
   param(
     [string]$Outcome,
@@ -373,6 +431,7 @@ if ($Engine -eq 'node') {
           wrapper_duration_sec = Get-DurationSec
         }
         $NotifyOutcome = 'error'; $NotifyEngine = 'node'
+        Send-FatalNtfy -Reason "hard-timeout-$TimeoutMinutes-min" -Phase 'dispatch-mjs' -ExitCode -1 -Attempts $attempt
 
         exit 3
       }
@@ -407,6 +466,7 @@ if ($Engine -eq 'node') {
           wrapper_duration_sec = Get-DurationSec
         }
         $NotifyOutcome = 'error'; $NotifyEngine = 'node'
+        Send-FatalNtfy -Reason "dispatch-mjs-exit-2" -Phase 'dispatch-mjs' -ExitCode $finalNodeExit -Attempts $attempt
         exit 2
       } else {
         Write-Log "dispatch.mjs returned exit=$finalNodeExit (retryable)" 'warn'
@@ -437,6 +497,7 @@ if ($Engine -eq 'node') {
       wrapper_duration_sec = Get-DurationSec
     }
     $NotifyOutcome = 'error'; $NotifyEngine = 'node'
+    Send-FatalNtfy -Reason 'retries-exhausted' -Phase 'dispatch-mjs' -ExitCode $finalNodeExit -Attempts $attempt
     exit 1
   }
 
