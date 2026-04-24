@@ -101,16 +101,15 @@ export async function checkAndAlert(config) {
   const alertState = readAlertState();
   const prevState = alertState.prev_state;
   const host = hostname();
+  const lastAlertTs = alertState.last_alert_ts;
+  const lastAlertMs = lastAlertTs ? new Date(lastAlertTs).getTime() : 0;
+  const hoursSinceAlert = (Date.now() - lastAlertMs) / 3_600_000;
 
   let sent = false;
 
-  // State transition alert
-  const onTransitions = alertConfig.on_transitions ?? ["down", "degraded"];
-  if (prevState && prevState !== health.state && onTransitions.includes(health.state)) {
-    const priority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
-
-    // Build a rich body for degraded/down alerts with failure details
-    let body = `${prevState} -> ${health.state}: ${health.reason}`;
+  // Compose a rich body used by both transition and stuck re-alerts.
+  const buildBody = (prefix) => {
+    let body = prefix;
     const sf = health.last_structural_failure;
     if (sf) {
       body += `\nmodel=${sf.model ?? "unknown"}`;
@@ -118,11 +117,39 @@ export async function checkAndAlert(config) {
       if (sf.message) body += `\nerror="${sf.message.slice(0, 200)}"`;
       body += `\nat ${sf.ts}`;
     }
+    return body;
+  };
 
+  // State transition alert
+  const onTransitions = alertConfig.on_transitions ?? ["down", "degraded"];
+  if (prevState && prevState !== health.state && onTransitions.includes(health.state)) {
+    const priority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
     sent = await sendNtfy(
       topic,
       `Dispatcher ${health.state} on ${host}`,
-      body,
+      buildBody(`${prevState} -> ${health.state}: ${health.reason}`),
+      priority,
+    );
+  }
+
+  // 2026-04-24 alerting-gap fix: stuck-state re-alert. Without this, a
+  // machine that flips healthy -> down once and stays down for 22h sends
+  // exactly one ntfy and then goes silent. Re-fire at a configurable cadence
+  // while stuck in an alerting state so Perry knows it's still broken.
+  const stuckRealertHours = alertConfig.stuck_realert_hours ?? 4;
+  const isStuckBadState = prevState === health.state && onTransitions.includes(health.state);
+  if (!sent && isStuckBadState && stuckRealertHours > 0 && hoursSinceAlert >= stuckRealertHours) {
+    const priority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
+    // Distinguish "started in bad state, no prior alert" from "stuck after
+    // transition alert". Avoids a misleading "still down" when there was no
+    // prior alert to be still-anything relative to.
+    const prefix = lastAlertTs
+      ? `still ${health.state} (${hoursSinceAlert.toFixed(1)}h since last alert)`
+      : `started in ${health.state} state`;
+    sent = await sendNtfy(
+      topic,
+      `Dispatcher still ${health.state} on ${host}`,
+      buildBody(`${prefix}: ${health.reason}`),
       priority,
     );
   }
@@ -130,10 +157,6 @@ export async function checkAndAlert(config) {
   // Heartbeat: periodic "still running" ping
   const heartbeatHours = alertConfig.heartbeat_hours ?? 168; // 7 days
   if (!sent && health.state === "healthy" && heartbeatHours > 0) {
-    const lastAlertMs = alertState.last_alert_ts
-      ? new Date(alertState.last_alert_ts).getTime()
-      : 0;
-    const hoursSinceAlert = (Date.now() - lastAlertMs) / 3_600_000;
     if (hoursSinceAlert >= heartbeatHours) {
       sent = await sendNtfy(
         topic,
