@@ -3,140 +3,235 @@ import assert from "node:assert/strict";
 import { acquireDispatchLock, releaseDispatchLock } from "../gist.mjs";
 
 // --- Mock helpers ---
+// Phase A shape (2026-04-24):
+//   _readFn(gistId, opts) -> { data, etag, status }
+//   _writeFn(gistId, payload, opts) -> { ok, status }
 
-/** Create a mock read function that returns a preset value. */
-function mockRead(returnVal) {
-  let callCount = 0;
-  const fn = async () => { callCount++; return returnVal; };
-  fn.callCount = () => callCount;
+function mockReadOnce(returnVal) {
+  const fn = async () => returnVal;
   return fn;
 }
 
-/** Create a mock read that returns different values on successive calls. */
-function mockReadSequence(values) {
-  let idx = 0;
-  const fn = async () => values[idx++] ?? null;
-  return fn;
+function mockReadLiveFromWriter(writerRef) {
+  // Reads reflect whatever the write mock last persisted (same process).
+  return async () => ({
+    data: writerRef.lastData,
+    etag: writerRef.nextEtag ?? "etag-0",
+    status: 200,
+  });
 }
 
-/** Create a mock write that captures written data. */
-function mockWrite(success = true) {
-  let lastData = null;
-  let callCount = 0;
-  const fn = async (_gistId, _filename, data) => { lastData = data; callCount++; return success; };
-  fn.lastData = () => lastData;
-  fn.callCount = () => callCount;
+function mockWriter(opts = {}) {
+  const state = {
+    lastData: opts.initial ?? null,
+    callCount: 0,
+    nextEtag: opts.etag ?? "etag-1",
+    nextStatus: opts.status ?? 200,
+    nextOk: opts.ok ?? true,
+    receivedEtags: [],
+  };
+  const fn = async (_gistId, payload, opts) => {
+    state.callCount++;
+    state.receivedEtags.push(opts?.etag ?? null);
+    if (state.nextOk === false) return { ok: false, status: state.nextStatus };
+    state.lastData = payload; // null on release = file deleted
+    return { ok: true, status: state.nextStatus };
+  };
+  fn.state = state;
   return fn;
 }
 
 // --- acquireDispatchLock ---
 
-describe("acquireDispatchLock", () => {
-  it("acquires lock when no existing lock", async () => {
-    const read = mockReadSequence([
-      null, // no existing lock
-      null, // re-read returns null (we'll make it return our lock)
-    ]);
-    const write = mockWrite(true);
-
-    // Override re-read to return whatever was written
-    let written = null;
-    const seqRead = async (gistId, filename, opts) => {
-      if (written) return written;
-      return null;
-    };
-    const seqWrite = async (gistId, filename, data, opts) => {
-      written = data;
-      return true;
+describe("acquireDispatchLock (ETag edition)", () => {
+  it("acquires lock when no existing lock exists on the gist", async () => {
+    const writer = mockWriter();
+    const read = async () => ({ data: null, etag: "etag-init", status: 200 });
+    // After write, re-read must surface our payload for the DID-I-WIN verification.
+    let seenWrite = false;
+    const verifyingRead = async () => {
+      if (!seenWrite) {
+        seenWrite = true;
+        return { data: null, etag: "etag-init", status: 200 };
+      }
+      return { data: writer.state.lastData, etag: "etag-after", status: 200 };
     };
 
     const result = await acquireDispatchLock("gist123", "laptop", {
       token: "tok",
       lockTtlMs: 600_000,
-      _readFn: seqRead,
-      _writeFn: seqWrite,
+      _readFn: verifyingRead,
+      _writeFn: writer,
     });
 
     assert.equal(result.acquired, true);
     assert.ok(result.lockId);
-    assert.equal(result.degraded, undefined);
+    assert.equal(result.fencingToken, 1);
+    assert.equal(writer.state.receivedEtags[0], "etag-init");
   });
 
-  it("acquires lock when existing lock is stale (> TTL)", async () => {
-    const staleLock = {
-      machine: "other-pc",
-      locked_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(), // 15 min ago
-      lock_id: "old-uuid",
+  it("acquires lock when existing lock is expired (past expiresAt)", async () => {
+    const expiredLock = {
+      locked: true,
+      lockedBy: "other-pc",
+      acquiredAt: Date.now() - 20 * 60_000,
+      expiresAt: Date.now() - 5 * 60_000, // expired 5 min ago
+      fencingToken: 7,
+      lockId: "old-uuid",
     };
-
-    let written = null;
-    const seqRead = async () => written ?? staleLock;
-    const seqWrite = async (_g, _f, data) => { written = data; return true; };
-
-    const result = await acquireDispatchLock("gist123", "laptop", {
-      token: "tok",
-      lockTtlMs: 600_000,
-      _readFn: seqRead,
-      _writeFn: seqWrite,
-    });
-
-    assert.equal(result.acquired, true);
-    assert.ok(result.lockId);
-  });
-
-  it("rejects when lock held by another machine within TTL", async () => {
-    const activeLock = {
-      machine: "other-pc",
-      locked_at: new Date(Date.now() - 30_000).toISOString(), // 30s ago
-      lock_id: "active-uuid",
+    const writer = mockWriter();
+    let calls = 0;
+    const read = async () => {
+      calls++;
+      if (calls === 1) return { data: expiredLock, etag: "etag-stale", status: 200 };
+      return { data: writer.state.lastData, etag: "etag-after", status: 200 };
     };
-
-    const read = mockRead(activeLock);
-    const write = mockWrite(true);
 
     const result = await acquireDispatchLock("gist123", "laptop", {
       token: "tok",
       lockTtlMs: 600_000,
       _readFn: read,
-      _writeFn: write,
+      _writeFn: writer,
     });
 
-    assert.equal(result.acquired, false);
-    assert.match(result.reason, /locked by other-pc/);
-    assert.equal(write.callCount(), 0); // should not attempt to write
+    assert.equal(result.acquired, true);
+    assert.ok(result.lockId);
+    assert.equal(result.fencingToken, 8, "fencing token must monotonically advance across holders");
   });
 
-  it("rejects when lock race is lost (re-read returns different lock_id)", async () => {
-    const winnerLock = {
-      machine: "other-pc",
-      locked_at: new Date().toISOString(),
-      lock_id: "winner-uuid",
+  it("rejects when lock is held by another machine and not yet expired", async () => {
+    const activeLock = {
+      locked: true,
+      lockedBy: "other-pc",
+      acquiredAt: Date.now() - 30_000,
+      expiresAt: Date.now() + 10 * 60_000,
+      fencingToken: 3,
+      lockId: "active-uuid",
     };
-
-    let callNum = 0;
-    const seqRead = async () => {
-      callNum++;
-      if (callNum === 1) return null; // no existing lock on first read
-      return winnerLock; // another machine claimed it before our re-read
-    };
-    const write = mockWrite(true);
+    const writer = mockWriter();
+    const read = async () => ({ data: activeLock, etag: "etag-active", status: 200 });
 
     const result = await acquireDispatchLock("gist123", "laptop", {
       token: "tok",
       lockTtlMs: 600_000,
-      _readFn: seqRead,
-      _writeFn: write,
+      _readFn: read,
+      _writeFn: writer,
     });
 
     assert.equal(result.acquired, false);
-    assert.match(result.reason, /lost lock race to other-pc/);
+    assert.match(result.reason, /locked by other-pc until /);
+    assert.equal(writer.state.callCount, 0, "should not attempt write when lock is held");
+  });
+
+  it("rejects with 'lost ETag race' when PATCH returns 412", async () => {
+    const writer = mockWriter({ ok: false, status: 412 });
+    const read = async () => ({ data: null, etag: "etag-init", status: 200 });
+
+    const result = await acquireDispatchLock("gist123", "laptop", {
+      token: "tok",
+      lockTtlMs: 600_000,
+      _readFn: read,
+      _writeFn: writer,
+    });
+
+    assert.equal(result.acquired, false);
+    assert.match(result.reason, /lost ETag race/);
+  });
+
+  it("rejects when re-read shows a different lockId (silent ETag non-enforcement)", async () => {
+    // Simulates GitHub accepting our write but another machine's write also
+    // landed during the same window. Our defense-in-depth re-read catches it.
+    const writer = mockWriter({ ok: true, status: 200 });
+    let callNum = 0;
+    const read = async () => {
+      callNum++;
+      if (callNum === 1) return { data: null, etag: "etag-init", status: 200 };
+      // Re-read returns someone else's lock, NOT ours
+      return {
+        data: {
+          locked: true,
+          lockedBy: "other-pc",
+          expiresAt: Date.now() + 60_000,
+          fencingToken: 1,
+          lockId: "not-our-uuid",
+        },
+        etag: "etag-after",
+        status: 200,
+      };
+    };
+
+    const result = await acquireDispatchLock("gist123", "laptop", {
+      token: "tok",
+      lockTtlMs: 600_000,
+      _readFn: read,
+      _writeFn: writer,
+    });
+
+    assert.equal(result.acquired, false);
+    assert.match(result.reason, /lost lock race to other-pc \(re-read mismatch\)/);
+  });
+
+  it("fencing token monotonically increments across successive acquisitions", async () => {
+    // First acquisition: no prior lock
+    const writer1 = mockWriter();
+    let r1Calls = 0;
+    const read1 = async () => {
+      r1Calls++;
+      if (r1Calls === 1) return { data: null, etag: "etag-0", status: 200 };
+      return { data: writer1.state.lastData, etag: "etag-1", status: 200 };
+    };
+    const first = await acquireDispatchLock("g", "laptop", {
+      token: "t", lockTtlMs: 60_000, _readFn: read1, _writeFn: writer1,
+    });
+    assert.equal(first.acquired, true);
+    assert.equal(first.fencingToken, 1);
+
+    // Second acquisition: prior (released) lock is still visible with token=5
+    const prior = { locked: false, fencingToken: 5 };
+    const writer2 = mockWriter();
+    let r2Calls = 0;
+    const read2 = async () => {
+      r2Calls++;
+      if (r2Calls === 1) return { data: prior, etag: "etag-5", status: 200 };
+      return { data: writer2.state.lastData, etag: "etag-6", status: 200 };
+    };
+    const second = await acquireDispatchLock("g", "laptop", {
+      token: "t", lockTtlMs: 60_000, _readFn: read2, _writeFn: writer2,
+    });
+    assert.equal(second.acquired, true);
+    assert.equal(second.fencingToken, 6, "must increment even when reclaiming");
+  });
+
+  it("same machine can reclaim its own lock", async () => {
+    const ownLock = {
+      locked: true,
+      lockedBy: "laptop",
+      acquiredAt: Date.now() - 60_000,
+      expiresAt: Date.now() + 60_000,
+      fencingToken: 2,
+      lockId: "own-uuid",
+    };
+    const writer = mockWriter();
+    let calls = 0;
+    const read = async () => {
+      calls++;
+      if (calls === 1) return { data: ownLock, etag: "etag-own", status: 200 };
+      return { data: writer.state.lastData, etag: "etag-after", status: 200 };
+    };
+
+    const result = await acquireDispatchLock("gist123", "laptop", {
+      token: "tok",
+      lockTtlMs: 600_000,
+      _readFn: read,
+      _writeFn: writer,
+    });
+
+    assert.equal(result.acquired, true);
+    assert.equal(result.fencingToken, 3);
   });
 
   it("degrades gracefully when no token provided", async () => {
-    const result = await acquireDispatchLock("gist123", "laptop", {
-      // no token
-    });
-
+    const result = await acquireDispatchLock("gist123", "laptop", {});
     assert.equal(result.acquired, true);
     assert.equal(result.lockId, null);
     assert.equal(result.degraded, true);
@@ -144,42 +239,36 @@ describe("acquireDispatchLock", () => {
 
   it("degrades gracefully when read throws (network error)", async () => {
     const failRead = async () => { throw new Error("network timeout"); };
-    const write = mockWrite(true);
-
+    const writer = mockWriter();
     const result = await acquireDispatchLock("gist123", "laptop", {
       token: "tok",
       _readFn: failRead,
-      _writeFn: write,
+      _writeFn: writer,
     });
-
     assert.equal(result.acquired, true);
     assert.equal(result.degraded, true);
   });
 
-  it("degrades gracefully when write fails", async () => {
-    const read = mockRead(null); // no existing lock
-    const write = mockWrite(false); // write returns false
-
+  it("degrades gracefully when write returns a non-412 error status", async () => {
+    const writer = mockWriter({ ok: false, status: 500 });
+    const read = async () => ({ data: null, etag: "etag-init", status: 200 });
     const result = await acquireDispatchLock("gist123", "laptop", {
       token: "tok",
       _readFn: read,
-      _writeFn: write,
+      _writeFn: writer,
     });
-
     assert.equal(result.acquired, true);
     assert.equal(result.degraded, true);
   });
 
   it("degrades gracefully when write throws", async () => {
-    const read = mockRead(null);
+    const read = async () => ({ data: null, etag: "etag-init", status: 200 });
     const failWrite = async () => { throw new Error("403 forbidden"); };
-
     const result = await acquireDispatchLock("gist123", "laptop", {
       token: "tok",
       _readFn: read,
       _writeFn: failWrite,
     });
-
     assert.equal(result.acquired, true);
     assert.equal(result.degraded, true);
   });
@@ -187,35 +276,23 @@ describe("acquireDispatchLock", () => {
 
 // --- releaseDispatchLock ---
 
-describe("releaseDispatchLock", () => {
-  it("writes null machine to release lock", async () => {
-    const write = mockWrite(true);
-
-    await releaseDispatchLock("gist123", {
-      token: "tok",
-      _writeFn: write,
-    });
-
-    assert.equal(write.callCount(), 1);
-    assert.equal(write.lastData().machine, null);
-    assert.ok(write.lastData().released_at);
+describe("releaseDispatchLock (null-payload delete)", () => {
+  it("deletes the lock file via null payload", async () => {
+    const writer = mockWriter();
+    await releaseDispatchLock("gist123", { token: "tok", _writeFn: writer });
+    assert.equal(writer.state.callCount, 1);
+    assert.equal(writer.state.lastData, null, "null payload removes the file entirely");
   });
 
   it("does not throw on write failure", async () => {
     const failWrite = async () => { throw new Error("500 server error"); };
-
     // Should not throw
-    await releaseDispatchLock("gist123", {
-      token: "tok",
-      _writeFn: failWrite,
-    });
+    await releaseDispatchLock("gist123", { token: "tok", _writeFn: failWrite });
   });
 
   it("does nothing without token", async () => {
-    const write = mockWrite(true);
-
-    await releaseDispatchLock("gist123", { _writeFn: write });
-
-    assert.equal(write.callCount(), 0);
+    const writer = mockWriter();
+    await releaseDispatchLock("gist123", { _writeFn: writer });
+    assert.equal(writer.state.callCount, 0);
   });
 });
