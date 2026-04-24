@@ -81,6 +81,87 @@ async function sendNtfy(topic, title, body, priority = 3) {
 }
 
 /**
+ * Pure decision function — given health + last-alert state + config, decide
+ * what (if anything) to send. Returns null for no action, or an object with
+ * { kind, title, body, priority }. Split out from checkAndAlert so the
+ * branching logic is unit-testable without filesystem or network.
+ *
+ * kind values:
+ *   "transition" — state changed into a watched alerting state
+ *   "stuck"      — still in a watched alerting state; nth re-alert
+ *   "heartbeat"  — healthy, periodic keep-alive
+ *
+ * @param {object} args
+ * @param {object} args.health           - computeHealth() result
+ * @param {string|null} args.prevState   - previous state from alerting-state.json
+ * @param {string|null} args.lastAlertTs - ISO timestamp or null
+ * @param {number} args.hoursSinceAlert  - computed from lastAlertTs
+ * @param {string} args.host             - hostname
+ * @param {object} args.alertConfig      - config.alerting
+ * @returns {{kind: string, title: string, body: string, priority: number} | null}
+ */
+export function decideAlertAction({ health, prevState, lastAlertTs, hoursSinceAlert, host, alertConfig }) {
+  const onTransitions = alertConfig.on_transitions ?? ["down", "degraded"];
+  const isWatchedBadState = onTransitions.includes(health.state);
+  const badStatePriority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
+
+  const buildBody = (prefix) => {
+    let body = prefix;
+    const sf = health.last_structural_failure;
+    if (sf) {
+      if (sf.reason) body += `\nreason=${sf.reason}`;
+      body += `${sf.reason ? " " : "\n"}model=${sf.model ?? "unknown"}`;
+      if (sf.detail) body += ` detail=${sf.detail}`;
+      if (sf.message) body += `\nerror="${sf.message.slice(0, 200)}"`;
+      body += `\nat ${sf.ts}`;
+    }
+    return body;
+  };
+
+  // Priority 1: state transition into a watched state.
+  if (prevState && prevState !== health.state && isWatchedBadState) {
+    return {
+      kind: "transition",
+      title: `Dispatcher ${health.state} on ${host}`,
+      body: buildBody(`${prevState} -> ${health.state}: ${health.reason}`),
+      priority: badStatePriority,
+    };
+  }
+
+  // Priority 2: stuck in a watched state past the re-alert interval.
+  // 2026-04-24 alerting-gap fix: a single transition alert is easy to miss.
+  // Re-fire every stuck_realert_hours (default 4h, 0 disables).
+  const stuckRealertHours = alertConfig.stuck_realert_hours ?? 4;
+  const isStuck = prevState === health.state && isWatchedBadState;
+  if (isStuck && stuckRealertHours > 0 && hoursSinceAlert >= stuckRealertHours) {
+    // Distinguish "started in bad state, no prior alert" (no transition
+    // was ever observed) from "stuck after transition alert".
+    const prefix = lastAlertTs
+      ? `still ${health.state} (${hoursSinceAlert.toFixed(1)}h since last alert)`
+      : `started in ${health.state} state`;
+    return {
+      kind: "stuck",
+      title: `Dispatcher still ${health.state} on ${host}`,
+      body: buildBody(`${prefix}: ${health.reason}`),
+      priority: badStatePriority,
+    };
+  }
+
+  // Priority 3: heartbeat when healthy and silent for a while.
+  const heartbeatHours = alertConfig.heartbeat_hours ?? 168; // 7 days
+  if (health.state === "healthy" && heartbeatHours > 0 && hoursSinceAlert >= heartbeatHours) {
+    return {
+      kind: "heartbeat",
+      title: `Dispatcher heartbeat - ${host}`,
+      body: `Still healthy. Last success: ${health.last_success_ts ?? "none"}`,
+      priority: 1,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Check health state transitions and send alerts if configured.
  * Called at the end of each dispatch cycle (after log is written).
  *
@@ -105,66 +186,13 @@ export async function checkAndAlert(config) {
   const lastAlertMs = lastAlertTs ? new Date(lastAlertTs).getTime() : 0;
   const hoursSinceAlert = (Date.now() - lastAlertMs) / 3_600_000;
 
+  const action = decideAlertAction({
+    health, prevState, lastAlertTs, hoursSinceAlert, host, alertConfig,
+  });
+
   let sent = false;
-
-  // Compose a rich body used by both transition and stuck re-alerts.
-  const buildBody = (prefix) => {
-    let body = prefix;
-    const sf = health.last_structural_failure;
-    if (sf) {
-      body += `\nmodel=${sf.model ?? "unknown"}`;
-      if (sf.detail) body += ` detail=${sf.detail}`;
-      if (sf.message) body += `\nerror="${sf.message.slice(0, 200)}"`;
-      body += `\nat ${sf.ts}`;
-    }
-    return body;
-  };
-
-  // State transition alert
-  const onTransitions = alertConfig.on_transitions ?? ["down", "degraded"];
-  if (prevState && prevState !== health.state && onTransitions.includes(health.state)) {
-    const priority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
-    sent = await sendNtfy(
-      topic,
-      `Dispatcher ${health.state} on ${host}`,
-      buildBody(`${prevState} -> ${health.state}: ${health.reason}`),
-      priority,
-    );
-  }
-
-  // 2026-04-24 alerting-gap fix: stuck-state re-alert. Without this, a
-  // machine that flips healthy -> down once and stays down for 22h sends
-  // exactly one ntfy and then goes silent. Re-fire at a configurable cadence
-  // while stuck in an alerting state so Perry knows it's still broken.
-  const stuckRealertHours = alertConfig.stuck_realert_hours ?? 4;
-  const isStuckBadState = prevState === health.state && onTransitions.includes(health.state);
-  if (!sent && isStuckBadState && stuckRealertHours > 0 && hoursSinceAlert >= stuckRealertHours) {
-    const priority = (health.state === "down" || health.state === "degraded") ? 4 : 3;
-    // Distinguish "started in bad state, no prior alert" from "stuck after
-    // transition alert". Avoids a misleading "still down" when there was no
-    // prior alert to be still-anything relative to.
-    const prefix = lastAlertTs
-      ? `still ${health.state} (${hoursSinceAlert.toFixed(1)}h since last alert)`
-      : `started in ${health.state} state`;
-    sent = await sendNtfy(
-      topic,
-      `Dispatcher still ${health.state} on ${host}`,
-      buildBody(`${prefix}: ${health.reason}`),
-      priority,
-    );
-  }
-
-  // Heartbeat: periodic "still running" ping
-  const heartbeatHours = alertConfig.heartbeat_hours ?? 168; // 7 days
-  if (!sent && health.state === "healthy" && heartbeatHours > 0) {
-    if (hoursSinceAlert >= heartbeatHours) {
-      sent = await sendNtfy(
-        topic,
-        `Dispatcher heartbeat - ${host}`,
-        `Still healthy. Last success: ${health.last_success_ts ?? "none"}`,
-        1, // min priority for heartbeat
-      );
-    }
+  if (action) {
+    sent = await sendNtfy(topic, action.title, action.body, action.priority);
   }
 
   // Persist state
