@@ -12,19 +12,66 @@ import { TASK_TO_CLASS } from "./router.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_PATH = resolve(__dirname, "..", "..", "status", "budget-dispatch-log.jsonl");
 
-// I-1: Gemini native structured-output schema. When passed as responseSchema
-// with responseMimeType "application/json", Gemini guarantees the response
-// is valid JSON matching this shape — no extractJson / nudge-retry needed.
-const SELECTOR_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
-    project: { type: Type.STRING },
-    task: { type: Type.STRING },
-    reason: { type: Type.STRING },
-  },
-  required: ["project", "task", "reason"],
-  propertyOrdering: ["project", "task", "reason"],
-};
+// I-1 + 2026-04-24 fleet-idle fix: Gemini native structured-output schema.
+// When passed as responseSchema with responseMimeType "application/json",
+// Gemini guarantees the response is valid JSON matching this shape.
+//
+// Schema is built dynamically from `projects_in_rotation` so the `project`
+// and `task` fields are constrained to the union of valid slugs and task
+// names. Prior to this change, `task: STRING` was unconstrained and Gemini
+// 2.5 Flash was hallucinating class-name strings (e.g. "tests_gen" instead
+// of "tests-gen"), which caused 22h of fleet-wide task_not_allowed skips.
+//
+// Note: the `task` enum is a union across ALL projects' opportunistic_tasks.
+// This prevents Gemini from inventing non-existent task names but does not
+// prevent it from picking a task that's valid globally yet not in the
+// chosen project's allowlist. Post-call allowlist validation + the
+// corrective retry below handle that per-project mismatch.
+function buildSelectorSchema(projects) {
+  const allTasks = [...new Set(projects.flatMap((p) => p.opportunistic_tasks ?? []))];
+  const allSlugs = projects.map((p) => p.slug);
+  return {
+    type: Type.OBJECT,
+    properties: {
+      project: { type: Type.STRING, enum: allSlugs },
+      task: { type: Type.STRING, enum: allTasks },
+      reason: { type: Type.STRING },
+    },
+    required: ["project", "task", "reason"],
+    propertyOrdering: ["project", "task", "reason"],
+  };
+}
+
+// Normalize hyphen/underscore aliases (e.g. "tests_gen" -> "tests-gen").
+// Returns the canonical task string present in `allowedTasks`, or null if
+// no match (even after alias substitution).
+export function normalizeTaskAlias(task, allowedTasks) {
+  if (allowedTasks.includes(task)) return task;
+  const withHyphens = task.replaceAll("_", "-");
+  if (allowedTasks.includes(withHyphens)) return withHyphens;
+  const withUnderscores = task.replaceAll("-", "_");
+  if (allowedTasks.includes(withUnderscores)) return withUnderscores;
+  return null;
+}
+
+// Append a corrective block to the prompt when the first selection picked
+// a task not in the chosen project's allowed list. Keeps the original rules
+// visible and adds a sharp reminder with the exact valid list.
+function buildCorrectivePrompt(originalPrompt, rejected) {
+  const valid = rejected.allowed.map((t) => `- \`${t}\``).join("\n");
+  return `${originalPrompt}
+
+---
+
+## Previous selection was rejected
+
+Your previous response picked project \`${rejected.project}\` with task \`${rejected.task}\`, but that task is NOT in this project's allowed list.
+
+Valid tasks for \`${rejected.project}\` (pick EXACTLY one of these — case-sensitive, exact hyphenation):
+${valid}
+
+Pick a task from the list above, OR pick a different project entirely.`;
+}
 
 /**
  * Call Gemini to select one project and one task from the rotation.
@@ -134,7 +181,11 @@ export async function selectProjectAndTask(config, clients) {
         .join("\n")
     : "(no recent dispatches)";
 
-  const prompt = buildSelectorPrompt(selectorContexts, diversityHint);
+  // Keep the original prompt unmutated so corrective retries rebuild from a
+  // clean base. Layering corrective blocks across >1 retry would confuse the
+  // model (Gemini 2.5-pro audit, 2026-04-24).
+  const initialPrompt = buildSelectorPrompt(selectorContexts, diversityHint);
+  let prompt = initialPrompt;
   // Default to gemini-2.5-flash: (1) supports thinkingBudget: 0 (pro does not,
   // rejects with INVALID_ARGUMENT), (2) better free-tier rate limits, (3) less
   // subject to pro's high-demand 503 spikes. Selector task is structured
@@ -155,104 +206,133 @@ export async function selectProjectAndTask(config, clients) {
     temperature,
     maxOutputTokens: maxTokens,
     responseMimeType: "application/json",
-    responseSchema: SELECTOR_SCHEMA,
+    responseSchema: buildSelectorSchema(projects),
     ...(isFlash ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
   };
 
-  let responseText;
-  try {
-    responseText = await callGeminiWithRetry(clients.gemini, model, prompt, genConfig);
-  } catch (e) {
-    console.error(`[selector] Gemini call failed: ${e.message}`);
-    // callGeminiWithRetry attaches .selectorDetails with { model, retries,
-    // root_cause, api_error_message, api_status } -- pass through verbatim
-    // so the caller's JSONL entry carries full diagnostics.
-    const d = e.selectorDetails ?? {};
-    return {
-      error: {
-        reason: "gemini_call_failed",
-        detail: d.root_cause ?? "unknown",
-        model: d.model ?? model,
-        retries: d.retries,
-        message: d.api_error_message ?? e.message,
-        api_status: d.api_status ?? null,
-      },
-    };
-  }
-
-  // Defense-in-depth: if callGeminiWithRetry somehow returned non-string, fail.
-  if (typeof responseText !== "string" || responseText.length === 0) {
-    console.error("[selector] Gemini returned empty/non-string response");
-    return {
-      error: { reason: "empty_response", detail: "callGeminiWithRetry returned non-string", model },
-    };
-  }
-
-  // Native JSON mode output parses directly. Keep extractJson as a last-resort
-  // fallback in case the SDK ever delivers fenced / preamble-wrapped text
-  // despite the mime-type hint.
-  let selection;
-  try {
-    selection = JSON.parse(responseText);
-  } catch {
+  // 2026-04-24 fleet-idle fix: wrap selection + validation in a retry loop.
+  // On first task_not_allowed, re-prompt with a corrective suffix that shows
+  // Gemini the exact valid task list for the project it picked. Limit to 2
+  // attempts so a persistently-hallucinating model still fails closed quickly.
+  const MAX_ATTEMPTS = 2;
+  let lastSelection = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let responseText;
     try {
-      selection = extractJson(responseText);
-    } catch (e2) {
-      console.error(`[selector] JSON parse failed: ${e2.message}`);
+      responseText = await callGeminiWithRetry(clients.gemini, model, prompt, genConfig);
+    } catch (e) {
+      console.error(`[selector] Gemini call failed: ${e.message}`);
+      // callGeminiWithRetry attaches .selectorDetails with { model, retries,
+      // root_cause, api_error_message, api_status } -- pass through verbatim
+      // so the caller's JSONL entry carries full diagnostics.
+      const d = e.selectorDetails ?? {};
       return {
-        error: { reason: "json_parse_failed", detail: e2.message, model, message: responseText.slice(0, 200) },
+        error: {
+          reason: "gemini_call_failed",
+          detail: d.root_cause ?? "unknown",
+          model: d.model ?? model,
+          retries: d.retries,
+          message: d.api_error_message ?? e.message,
+          api_status: d.api_status ?? null,
+        },
       };
+    }
+
+    // Defense-in-depth: if callGeminiWithRetry somehow returned non-string, fail.
+    if (typeof responseText !== "string" || responseText.length === 0) {
+      console.error("[selector] Gemini returned empty/non-string response");
+      return {
+        error: { reason: "empty_response", detail: "callGeminiWithRetry returned non-string", model },
+      };
+    }
+
+    // Native JSON mode output parses directly. Keep extractJson as a last-resort
+    // fallback in case the SDK ever delivers fenced / preamble-wrapped text
+    // despite the mime-type hint.
+    let selection;
+    try {
+      selection = JSON.parse(responseText);
+    } catch {
+      try {
+        selection = extractJson(responseText);
+      } catch (e2) {
+        console.error(`[selector] JSON parse failed: ${e2.message}`);
+        return {
+          error: { reason: "json_parse_failed", detail: e2.message, model, message: responseText.slice(0, 200) },
+        };
+      }
+    }
+
+    // Validate selection against config
+    if (!selection.project || !selection.task) {
+      console.error("[selector] response missing project or task field");
+      return {
+        error: { reason: "invalid_response_shape", detail: "missing project or task field", model },
+      };
+    }
+
+    // S-6: post-call allowlist validation -- project slug + task allowlist.
+    const projectConfig = projects.find((p) => p.slug === selection.project);
+    if (!projectConfig) {
+      console.error(`[selector] unknown project slug: ${selection.project}`);
+      return {
+        error: { reason: "unknown_project_slug", detail: selection.project, model },
+      };
+    }
+
+    // Hyphen/underscore alias normalization (belt-and-suspenders with the
+    // schema enum). Catches `tests_gen` vs `tests-gen` drift if Gemini ever
+    // emits a class-style token past the enum.
+    const canonicalTask = normalizeTaskAlias(selection.task, projectConfig.opportunistic_tasks);
+
+    if (canonicalTask) {
+      // Post-selection diversity guard: if the LLM picked a (project, task)
+      // pair that matches one of the last 3 dispatches, log a warning. The
+      // structural task-class filter above should have prevented this, but
+      // the LLM may pick a different task keyword in the same class, or the
+      // filter may have fallen back. Observability, not a hard block.
+      const recentPairs = recentDispatches.slice(0, 3);
+      const isRepeat = recentPairs.some(
+        (d) => d.project === selection.project && d.task === canonicalTask
+      );
+      if (isRepeat) {
+        console.warn(
+          `[selector] WARNING: picked recently-dispatched pair ` +
+          `${selection.project}/${canonicalTask} — structural filter may have fallen back`
+        );
+      }
+
+      return {
+        project: selection.project,
+        task: canonicalTask,
+        reason: selection.reason ?? "",
+        projectConfig,
+      };
+    }
+
+    // task_not_allowed — retry once with corrective feedback before giving up.
+    lastSelection = { project: selection.project, task: selection.task, allowed: projectConfig.opportunistic_tasks };
+    if (attempt < MAX_ATTEMPTS - 1) {
+      console.warn(
+        `[selector] task "${selection.task}" not in ${selection.project}'s allowed list — ` +
+        `retrying with corrective prompt (attempt ${attempt + 2}/${MAX_ATTEMPTS})`
+      );
+      prompt = buildCorrectivePrompt(initialPrompt, lastSelection);
+      continue;
     }
   }
 
-  // Validate selection against config
-  if (!selection.project || !selection.task) {
-    console.error("[selector] response missing project or task field");
-    return {
-      error: { reason: "invalid_response_shape", detail: "missing project or task field", model },
-    };
-  }
-
-  // S-6: post-call allowlist validation -- project slug + task allowlist.
-  const projectConfig = projects.find((p) => p.slug === selection.project);
-  if (!projectConfig) {
-    console.error(`[selector] unknown project slug: ${selection.project}`);
-    return {
-      error: { reason: "unknown_project_slug", detail: selection.project, model },
-    };
-  }
-
-  if (!projectConfig.opportunistic_tasks.includes(selection.task)) {
-    console.error(
-      `[selector] task "${selection.task}" not in ${selection.project}'s opportunistic_tasks`
-    );
-    return {
-      error: { reason: "task_not_allowed", detail: `${selection.project}/${selection.task}`, model },
-    };
-  }
-
-  // Post-selection diversity guard: if the LLM picked a (project, task) pair
-  // that matches one of the last 3 dispatches, log a warning. The structural
-  // task-class filter above should have prevented this, but the LLM may pick
-  // a different task keyword in the same class, or the filter may have fallen
-  // back. This is observability, not a hard block — the structural filter is
-  // the real enforcement.
-  const recentPairs = recentDispatches.slice(0, 3);
-  const isRepeat = recentPairs.some(
-    (d) => d.project === selection.project && d.task === selection.task
+  // Both attempts failed validation.
+  console.error(
+    `[selector] task "${lastSelection.task}" not in ${lastSelection.project}'s opportunistic_tasks (after retry)`
   );
-  if (isRepeat) {
-    console.warn(
-      `[selector] WARNING: picked recently-dispatched pair ` +
-      `${selection.project}/${selection.task} — structural filter may have fallen back`
-    );
-  }
-
   return {
-    project: selection.project,
-    task: selection.task,
-    reason: selection.reason ?? "",
-    projectConfig,
+    error: {
+      reason: "task_not_allowed",
+      detail: `${lastSelection.project}/${lastSelection.task}`,
+      model,
+      retry_attempted: true,
+    },
   };
 }
 
