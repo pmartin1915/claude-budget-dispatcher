@@ -74,11 +74,39 @@ export function normalizeTaskAlias(task, allowedTasks) {
 // Three machines hitting fallback in the same cycle will deterministically
 // pick the same (project, task). The gist ETag lock serializes them so
 // only one runs; the others see the lock and skip. No clobber risk.
-export function deterministicFallback(contexts, cause = "unknown") {
-  const viable = contexts.filter(
+export function deterministicFallback(
+  contexts,
+  cause = "unknown",
+  recentFallbackAttempts = new Map()
+) {
+  const allViable = contexts.filter(
     (c) => Array.isArray(c.opportunistic_tasks) && c.opportunistic_tasks.length > 0
   );
-  if (viable.length === 0) return null;
+  if (allViable.length === 0) return null;
+
+  // Per-project fallback cooldown (C3): skip projects that have already burned
+  // DETERMINISTIC_FALLBACK_COOLDOWN_THRESHOLD fallback attempts in the recent
+  // window. Prevents the "Gemini-out-AND-worker-broken" loop where the same
+  // oldest project gets picked every cycle. If filter would empty the list,
+  // restore allViable (never leave the fleet with no option — same pattern as
+  // the task-class cooldown restoration at selector.mjs:213-215).
+  //
+  // FLEET CONCURRENCY NOTE (Gemini 2.5 Pro audit, HIGH severity, accepted as
+  // architectural trade-off per handoff §"PAL audit focus" #3): each fleet
+  // machine reads its LOCAL JSONL log, so machine views diverge under cycle
+  // interleaving. The gist ETag lock serializes dispatch *execution* but not
+  // log propagation. Worst case: 3 machines each see "alpha" at count=1 and
+  // each pick "alpha" before propagation, raising true count to 3 without any
+  // single-machine cutoff firing. This is a SOFT CAP, not a hard guarantee.
+  // Acceptable because: (1) gist lock prevents simultaneous dispatch, so
+  // damage is bounded to 3 fallback attempts per propagation window, (2) hard
+  // cap would require shared state (Redis / locked file) — out of scope for
+  // this session, (3) the C2 fallback-rate degraded rule will surface
+  // sustained quota exhaustion via ntfy regardless.
+  const cooled = allViable.filter(
+    (c) => (recentFallbackAttempts.get(c.slug) ?? 0) < DETERMINISTIC_FALLBACK_COOLDOWN_THRESHOLD
+  );
+  const viable = cooled.length > 0 ? cooled : allViable;
 
   const tsOf = (ctx) => {
     if (!ctx.last_dispatched || ctx.last_dispatched === "never") return 0;
@@ -103,6 +131,35 @@ export function deterministicFallback(contexts, cause = "unknown") {
     _fallback_reason: cause,
   };
 }
+
+// Detect Google's RESOURCE_EXHAUSTED daily-quota markers in a 429. Free-tier
+// 429s carry distinct shape vs. transient per-minute throttling: we want the
+// former to skip retries (they would burn 14s for nothing) and the latter to
+// keep the existing 2/4/8s backoff. Generous matching across SDK versions
+// (the @google/genai shape moved between releases — check message,
+// response.data, errorDetails, and status). False positives only cause one
+// extra fallback dispatch per cycle, which is cheap; false negatives waste
+// retries and silently degrade the fleet, which is what we're fixing.
+export function isQuotaExhausted(err) {
+  if (!err) return false;
+  const blob = JSON.stringify({
+    message: err.message ?? "",
+    status: err.status ?? "",
+    response: err.response?.data ?? "",
+    errorDetails: err.errorDetails ?? "",
+  }).toLowerCase();
+  if (blob.includes("resource_exhausted")) return true;
+  if (blob.includes("free_tier") || blob.includes("generate_content_free_tier_requests")) return true;
+  if (blob.includes("perdayperprojectpermodel") || blob.includes("per-day")) return true;
+  if (blob.includes("quota") && blob.includes("daily")) return true;
+  return false;
+}
+
+// Fallback cooldown threshold (C3): a project picked by the deterministic
+// fallback this many times in the recent window is skipped on the next pick.
+// Gemini 2.5 Pro audit flagged this as an architectural soft cap, not a hard
+// guarantee — see deterministicFallback's per-machine view divergence note.
+const DETERMINISTIC_FALLBACK_COOLDOWN_THRESHOLD = 2;
 
 // Append a corrective block to the prompt when the first selection picked
 // a task not in the chosen project's allowed list. Keeps the original rules
@@ -284,11 +341,26 @@ export async function selectProjectAndTask(config, clients) {
       const API_FAILURE = new Set([
         "empty_response",
         "rate_limited",
+        "quota_exhausted",
         "server_error",
         "api_error",
       ]);
       if (API_FAILURE.has(d.root_cause)) {
-        const fb = deterministicFallback(selectorContexts, d.root_cause);
+        // Count how many times each project was picked by the fallback in the
+        // recent window. The cooldown filter inside deterministicFallback uses
+        // this to avoid re-picking a project that has already failed >=2 times,
+        // which would otherwise loop the fleet on a broken project until
+        // sort order naturally rotated past it.
+        const recentFallbackAttempts = new Map();
+        for (const r of recentDispatches) {
+          if (r.selector_fallback) {
+            recentFallbackAttempts.set(
+              r.project,
+              (recentFallbackAttempts.get(r.project) ?? 0) + 1
+            );
+          }
+        }
+        const fb = deterministicFallback(selectorContexts, d.root_cause, recentFallbackAttempts);
         if (fb) {
           console.warn(
             `[selector] Gemini unreachable (${d.root_cause} after ${d.retries ?? "?"} retries), ` +
@@ -543,7 +615,13 @@ async function callGeminiWithRetry(gemini, model, prompt, genConfig) {
       // response on attempt 0 followed by a 400 on attempt 1 would be
       // misreported as "empty_response" because the else-if guard wouldn't
       // re-fire.
-      if (status === 429) rootCause = "rate_limited";
+      if (status === 429) {
+        // Distinguish daily-quota exhaustion from transient per-minute throttling.
+        // Free-tier 429s on a depleted RPD budget will stay 429 for hours;
+        // burning 3 retries x 2/4/8s on every cycle is pure cost. The fallback
+        // path handles "quota_exhausted" the same way it handles "rate_limited."
+        rootCause = isQuotaExhausted(e) ? "quota_exhausted" : "rate_limited";
+      }
       else if (status >= 500 && status < 600) rootCause = "server_error";
       else rootCause = "api_error";
 

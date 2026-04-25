@@ -217,6 +217,7 @@ export function getRecentDispatches(logPath, maxResults = 6) {
           project: obj.project,
           task: obj.task,
           ts: obj.ts,
+          selector_fallback: obj.selector_fallback === true,
         });
       }
     } catch {

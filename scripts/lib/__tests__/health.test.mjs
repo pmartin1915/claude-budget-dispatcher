@@ -141,3 +141,69 @@ describe("computeHealth — state machine", () => {
     assert.equal(h.last_success_ts, null);
   });
 });
+
+// Fallback-rate degraded rule (C2): a fallback dispatch returns
+// outcome=success today, so a sustained Gemini quota outage stays silent in
+// the existing alerting layer. This rule classifies the fleet as `degraded`
+// when >=50% of the recent window used the deterministic selector fallback,
+// catching the "burning free-tier faster than the cron cadence" condition
+// Perry asked for a distinct signal on.
+describe("computeHealth - fallback-rate rule", () => {
+  it("stays healthy when no recent cycles used the fallback", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(2) },
+      { outcome: "success", ts: ago(1.5) },
+      { outcome: "success", ts: ago(1) },
+      { outcome: "success", ts: ago(0.5) },
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "healthy");
+    assert.equal(h.selector_fallback_count, 0);
+  });
+
+  it("stays healthy when 2 of last 6 cycles used fallback (33%, below threshold)", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(3) },
+      { outcome: "success", ts: ago(2.5) },
+      { outcome: "success", ts: ago(2), selector_fallback: true },
+      { outcome: "success", ts: ago(1.5) },
+      { outcome: "success", ts: ago(1), selector_fallback: true },
+      { outcome: "success", ts: ago(0.5) },
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "healthy");
+    assert.equal(h.selector_fallback_count, 2);
+  });
+
+  it("escalates to degraded when 3 of last 6 cycles used fallback (50%)", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(3) },
+      { outcome: "success", ts: ago(2.5) },
+      { outcome: "success", ts: ago(2), selector_fallback: true },
+      { outcome: "success", ts: ago(1.5), selector_fallback: true },
+      { outcome: "success", ts: ago(1), selector_fallback: true },
+      { outcome: "success", ts: ago(0.5) },
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "degraded");
+    assert.equal(h.selector_fallback_count, 3);
+    assert.match(h.reason, /selector fallback/);
+  });
+
+  it("classifies degraded (not down) when 100% of last 6 cycles used fallback", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(3), selector_fallback: true },
+      { outcome: "success", ts: ago(2.5), selector_fallback: true },
+      { outcome: "success", ts: ago(2), selector_fallback: true },
+      { outcome: "success", ts: ago(1.5), selector_fallback: true },
+      { outcome: "success", ts: ago(1), selector_fallback: true },
+      { outcome: "success", ts: ago(0.5), selector_fallback: true },
+    ]);
+    const h = computeHealth(log);
+    // Down is reserved for total silence (3 consecutive errors or no success
+    // in 6+h with non-benign skips). Sustained fallback alone is degraded.
+    assert.equal(h.state, "degraded");
+    assert.equal(h.selector_fallback_count, 6);
+    assert.match(h.reason, /selector fallback/);
+  });
+});

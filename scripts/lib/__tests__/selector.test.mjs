@@ -9,7 +9,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeTaskAlias } from "../selector.mjs";
+import { normalizeTaskAlias, isQuotaExhausted } from "../selector.mjs";
 
 describe("normalizeTaskAlias", () => {
   const allowed = ["test", "typecheck", "audit", "tests-gen", "docs-gen", "session-log"];
@@ -49,5 +49,45 @@ describe("normalizeTaskAlias", () => {
   it("is case-sensitive (does not normalize case)", () => {
     assert.equal(normalizeTaskAlias("Audit", allowed), null);
     assert.equal(normalizeTaskAlias("TEST", allowed), null);
+  });
+});
+
+// Quota-exhausted detection on Gemini 429 errors. The fleet runs on a free-tier
+// API key (1500 RPD); when that bucket drains it stays drained until midnight
+// PT. We need to skip the 14s of retries that the per-minute throttle handler
+// would otherwise burn, and surface a distinct cause so alerting can degrade.
+describe("isQuotaExhausted", () => {
+  it("returns true for RESOURCE_EXHAUSTED status code in message", () => {
+    const err = { status: 429, message: "Got status: RESOURCE_EXHAUSTED. {error: ...}" };
+    assert.equal(isQuotaExhausted(err), true);
+  });
+
+  it("returns true when errorDetails contains free-tier quota metric", () => {
+    const err = {
+      status: 429,
+      message: "429 quota exceeded",
+      errorDetails: [{ "@type": "type.googleapis.com/google.rpc.QuotaFailure", violations: [{ quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests" }] }],
+    };
+    assert.equal(isQuotaExhausted(err), true);
+  });
+
+  it("returns true when response.data references PerDayPerProjectPerModel", () => {
+    const err = {
+      status: 429,
+      message: "Too Many Requests",
+      response: { data: { error: { details: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel" }] } } },
+    };
+    assert.equal(isQuotaExhausted(err), true);
+  });
+
+  it("returns false for transient 429 with no quota markers", () => {
+    const err = { status: 429, message: "Rate limit exceeded, try again later" };
+    assert.equal(isQuotaExhausted(err), false);
+  });
+
+  it("returns false for null / empty error", () => {
+    assert.equal(isQuotaExhausted(null), false);
+    assert.equal(isQuotaExhausted(undefined), false);
+    assert.equal(isQuotaExhausted({}), false);
   });
 });

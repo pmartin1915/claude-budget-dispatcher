@@ -23,6 +23,12 @@ const DOWN_ERROR_STREAK = 3;
 const DOWN_HOURS_WITHOUT_SUCCESS = 6;
 const DEGRADED_WINDOW = 6;
 const DEGRADED_THRESHOLD = 3;
+// Sustained selector_fallback usage means Gemini is unreachable cycle after
+// cycle (free-tier quota blackout, key revoked, sustained outage). Three of
+// the last six cycles in fallback = 50% sample rate, enough signal to alert
+// without flapping. Hardcoded for v1; see handoff for "DO NOT add a config
+// key to tune this yet."
+const FALLBACK_DEGRADED_THRESHOLD = 3;
 
 // Benign skips: the dispatcher chose not to work (legitimate, not broken).
 // Structural skips: the dispatcher tried to work and broke.
@@ -94,6 +100,7 @@ export function computeHealth(logPath) {
 
   const tail = real.slice(-DEGRADED_WINDOW);
   const recentStructuralSkips = tail.filter(isStructuralSkip).length;
+  const recentFallbacks = tail.filter((e) => e.selector_fallback === true).length;
   // recentAllBenign: the tail contains ONLY benign skips/dry-runs (no errors,
   // no reverts, no structural skips). If there are errors mixed in, this is
   // NOT an idle state — it's potentially down.
@@ -145,12 +152,22 @@ export function computeHealth(logPath) {
       (failDetail ? ` (${failReason}: ${failDetail})` : ` (${failReason})`);
   }
 
+  // Fallback-rate degraded: catches sustained Gemini quota exhaustion that
+  // would otherwise stay silent because fallback dispatches return success.
+  // Doesn't override an existing structural-skip degraded reason (that's
+  // more informative when both conditions fire); only escalates from healthy.
+  if (state === "healthy" && recentFallbacks >= FALLBACK_DEGRADED_THRESHOLD) {
+    state = "degraded";
+    reason = `${recentFallbacks} of last ${tail.length} cycles used selector fallback (Gemini quota or auth?)`;
+  }
+
   return {
     state,
     reason,
     last_success_ts: lastSuccessTs,
     consecutive_errors: consecutiveErrors,
     structural_failures: recentStructuralSkips,
+    selector_fallback_count: recentFallbacks,
     hours_since_success: hoursSinceSuccess,
     last_structural_failure: lastStructuralFailure ? {
       reason: lastStructuralFailure.reason,

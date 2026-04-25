@@ -137,4 +137,42 @@ describe("deterministicFallback", () => {
     const fb = deterministicFallback(contexts);
     assert.equal(fb.project, "garbage");
   });
+
+  // Per-project fallback cooldown (C3): when the worker is also broken, the
+  // same oldest project would otherwise be picked every cycle. The cooldown
+  // skips projects that already burned >=2 fallback attempts in the recent
+  // window, diversifying across the rotation.
+  it("skips a project that has burned >=2 fallback attempts (cooldown)", () => {
+    const contexts = [
+      ctx("alpha", ["audit"], "2026-04-20T08:00:00Z"),  // oldest
+      ctx("bravo", ["audit"], "2026-04-22T08:00:00Z"),  // next-oldest
+    ];
+    const cooldown = new Map([["alpha", 2]]);
+    const fb = deterministicFallback(contexts, "rate_limited", cooldown);
+    assert.equal(fb.project, "bravo");
+  });
+
+  it("falls back to the unfiltered set when ALL viable contexts are cooled-down", () => {
+    // Never starve the fleet: if cooldown would leave zero options, restore
+    // the full viable set so we still dispatch something. Mirrors the
+    // task-class cooldown restoration pattern.
+    const contexts = [
+      ctx("alpha", ["audit"], "2026-04-20T08:00:00Z"),
+      ctx("bravo", ["audit"], "2026-04-22T08:00:00Z"),
+    ];
+    const cooldown = new Map([["alpha", 2], ["bravo", 3]]);
+    const fb = deterministicFallback(contexts, "rate_limited", cooldown);
+    assert.notEqual(fb, null);
+    assert.equal(fb.project, "alpha");  // oldest wins from unfiltered set
+  });
+
+  it("does not skip a project at exactly 1 fallback attempt (threshold is >=2)", () => {
+    const contexts = [
+      ctx("alpha", ["audit"], "2026-04-20T08:00:00Z"),
+      ctx("bravo", ["audit"], "2026-04-22T08:00:00Z"),
+    ];
+    const cooldown = new Map([["alpha", 1]]);
+    const fb = deterministicFallback(contexts, "rate_limited", cooldown);
+    assert.equal(fb.project, "alpha");
+  });
 });
