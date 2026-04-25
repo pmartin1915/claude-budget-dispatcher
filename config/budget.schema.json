@@ -13,6 +13,19 @@
     "dry_run": {
       "type": "boolean"
     },
+    "auto_push": {
+      "type": "boolean",
+      "description": "Fleet-wide kill switch for auto-push. Both this AND project_overrides.<slug>.auto_push (or projects_in_rotation[].auto_push) must be true for any push to fire. Path firewall lives in auto_push_protected_globs + per-project auto_push_allowlist."
+    },
+    "auto_pr": {
+      "type": "boolean",
+      "description": "Deprecated. Draft PR creation is implicit on successful auto-push. Kept for backward-compat; ignored by dispatch.mjs Phase 5b."
+    },
+    "auto_push_protected_globs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Global never-push patterns. Always win over project allowlists. Module also embeds a hardcoded fallback list (defense-in-depth: a config typo cannot disable protection)."
+    },
     "status_gist_id": {
       "type": "string"
     },
@@ -296,6 +309,15 @@
               "type": "string"
             },
             "minItems": 1
+          },
+          "auto_push": {
+            "type": "boolean",
+            "description": "Per-project auto-push opt-in. Defaults to false. Both this AND top-level auto_push must be true to push. Empty auto_push_allowlist also blocks (defensive default)."
+          },
+          "auto_push_allowlist": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Glob patterns whose matching paths are eligible for auto-push. Empty array blocks all pushes regardless of auto_push value (footgun guard). Patterns ANDed with global auto_push_protected_globs which always wins."
           }
         }
       }

@@ -4,6 +4,17 @@
   "paused": false,
   "dry_run": true,
 
+  "$comment_auto_push": "Pillar 1 step 1 (see worldbuilder/VEYDRIA-VISION.md). Fleet-wide kill switch for auto-push of auto/* branches and draft PRs. BOTH this AND per-project auto_push must be true for any push to fire. Path firewall: auto_push_protected_globs (always wins) + per-project auto_push_allowlist (empty array blocks all).",
+  "auto_push": false,
+  "auto_push_protected_globs": [
+    ".github/**",
+    "package.json",
+    "package-lock.json",
+    "**/secrets/**",
+    "**/credentials/**",
+    "LICENSE*"
+  ],
+
   "$comment_alerting": "E1.1: Out-of-band notifications via ntfy.sh. Set enabled: true and pick a topic to receive alerts when the dispatcher goes down. heartbeat_hours sends a periodic 'still healthy' ping (0 to disable).",
   "alerting": {
     "enabled": false,
@@ -110,7 +121,10 @@
       "slug": "example-project",
       "path": "REPLACE_WITH_ABSOLUTE_PATH_TO_YOUR_PROJECT",
       "clinical_gate": false,
-      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"]
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
+      "$comment_auto_push": "Per-project auto-push opt-in. Defaults to false. Set true AND populate auto_push_allowlist to enable. Empty allowlist blocks all pushes regardless (defensive default).",
+      "auto_push": false,
+      "auto_push_allowlist": []
     }
   ],
 

@@ -3,8 +3,17 @@
   "$comment": "Shared config — committed to git. All machines inherit these values. Machine-specific overrides go in config/local.json (gitignored).",
 
   "engine_override": "node",
+  "$comment_auto_push": "Pillar 1 step 1 (worldbuilder/VEYDRIA-VISION.md). Top-level auto_push is the fleet-wide kill switch. BOTH this AND per-project auto_push (in local.json projects_in_rotation) must be true to push. auto_pr is deprecated; draft PR is implicit on push success.",
   "auto_push": true,
   "auto_pr": true,
+  "auto_push_protected_globs": [
+    ".github/**",
+    "package.json",
+    "package-lock.json",
+    "**/secrets/**",
+    "**/credentials/**",
+    "LICENSE*"
+  ],
   "status_gist_id": "655d02ce43b293cacdf333a301b63bbf",
 
   "alerting": {

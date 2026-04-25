@@ -1,0 +1,138 @@
+# Auto-Push (Pillar 1 step 1)
+
+Path-firewalled push of `auto/<slug>-<task>-<date>` branches to `origin` plus a draft PR for the future Overseer. Gate 1 of the seven-gate stack from `worldbuilder/VEYDRIA-VISION.md` Pillar 3.
+
+## Default state
+
+The mechanism ships **dormant** on all rotation projects. Top-level `auto_push: true` is on (fleet-wide kill switch is armed), but every project has `auto_push: false` and an empty `auto_push_allowlist: []`. Nothing actually pushes until you opt a repo in.
+
+## Kill-switch ladder (defense-in-depth)
+
+A push fires only if **all four** layers pass:
+
+1. **Fleet flag** — top-level `auto_push: true` in `config/budget.json`.
+2. **Project flag** — `projects_in_rotation[i].auto_push: true`.
+3. **Non-empty allowlist** — `projects_in_rotation[i].auto_push_allowlist` has at least one pattern. Empty array always blocks (defensive default — prevents the footgun of opting in without listing eligible paths).
+4. **All changed files match allowlist AND match no protected glob** — see "Path firewall" below.
+
+Flip the fleet flag to `false` to disable everything across the fleet instantly without touching per-project config.
+
+## Path firewall
+
+Every changed file from `git diff-tree --no-commit-id --name-only -r -z HEAD` is checked:
+
+- **Protected globs always win.** If any file matches `auto_push_protected_globs` (top-level), the push is blocked regardless of allowlist.
+- **Allowlist is required.** Every file must match at least one pattern in the project's `auto_push_allowlist`.
+
+### Glob grammar
+
+POSIX separators only (`/`). Backslashes (Windows paths) are normalized to forward slashes before matching. Case-sensitive.
+
+| Token   | Meaning                                          |
+|---------|--------------------------------------------------|
+| `**`    | any characters, including `/`                    |
+| `*`     | any characters, NOT including `/`                |
+| `?`     | single character, not `/`                        |
+| literal | regex metacharacters escaped                     |
+
+Examples:
+
+- `src/**` matches `src/index.js` and `src/sub/deep/a.js` but not `tests/a.js`.
+- `src/*.js` matches `src/index.js` but not `src/sub/a.js`.
+- `**/secrets/**` matches `anything/secrets/key.txt` and `nested/dir/secrets/file`.
+
+**Note on hidden files (dotfiles):** The matcher matches files and directories that start with a dot (`.`) by default. `src/*` matches `src/.env`, and `**/.env` is a valid pattern to catch `.env` at any depth. If you need to allow regular `src/` files but exclude dotfiles, list them explicitly in `auto_push_protected_globs` (e.g., `src/.*`).
+
+### Default protected globs
+
+```json
+".github/**", "package.json", "package-lock.json",
+"**/secrets/**", "**/credentials/**", "LICENSE*"
+```
+
+Edit `auto_push_protected_globs` in `config/budget.json` to extend. Adding to or modifying this list is **never** an autonomous operation — it requires a human-reviewed PR. The dispatcher cannot edit its own protected-globs list.
+
+A hardcoded fallback list with the same six entries lives in `scripts/lib/auto-push.mjs` as `FALLBACK_PROTECTED_GLOBS`. If the config field is missing or empty, the fallback is used. Defense-in-depth: a config typo cannot disable protection.
+
+### Permanent never-auto-push (per `worldbuilder/VEYDRIA-VISION.md`)
+
+Even when adding a repo's allowlist, the following categories must never be in any allowlist anywhere:
+
+- Clinical code (any healthcare domain — burn-wizard, healthcare-apps, ECG wizard, medilex)
+- Veydria lore canon (`worldbuilder/religion/**`, `factions/**`, `magic/**`, `linguistics/**`, `ecology/**`, `economy/**`, `geography/**`, `timeline/**`)
+- Narrative content (dialogue trees, quest definitions, character motivation)
+- Game design (pacing, balance, encounter design, choice-consequence rules)
+- Framework / orchestrator code (`combo/`, `claude-budget-dispatcher/`, `sandbox-workflow-enhancement`)
+- CI/CD config (`.github/`, scheduled-task scripts, deploy pipelines)
+- Production `package.json` dependency changes
+- Secrets, credentials, license files
+- The `auto_push` allowlist itself, or any path firewall config
+
+These categories are best protected by NOT setting `auto_push: true` on the project at all. The protected-globs list catches the in-repo subset (`.github/**`, `package.json`, secrets, credentials, license).
+
+## How to opt a repo in
+
+1. In `config/budget.json`, find the project entry under `projects_in_rotation`.
+2. Set `auto_push: true`.
+3. Populate `auto_push_allowlist` with explicit globs covering only the paths whose changes are objectively-verifiable (engine, physics, asset pipeline, tests, golden fixtures, CHANGELOG-style docs). See VEYDRIA-VISION.md "majority autonomous, but safe" boundary.
+4. Restart the dispatcher (or just wait for the next scheduled run).
+
+Example (a hypothetical `engine-2d/` repo):
+
+```json
+{
+  "slug": "engine-2d",
+  "path": "c:/Users/perry/DevProjects/engine-2d",
+  "auto_push": true,
+  "auto_push_allowlist": [
+    "src/**",
+    "tests/**",
+    "benchmarks/**",
+    "CHANGELOG.md"
+  ]
+}
+```
+
+## How to verify a push happened
+
+1. Look in `status/budget-dispatch-log.jsonl` for an entry with `phase: "auto-push"`. Outcomes:
+   - `auto-push-success` — `pr_url` field has the PR link.
+   - `auto-push-blocked` — `reason` is one of: `disabled-global`, `disabled-project`, `empty-allowlist`, `outside-allowlist`, `protected-glob`. `blocked_path` and `matched_pattern` identify the offender.
+   - `auto-push-failed` — `reason` is one of: `git-push-failed`, `pr-create-failed`, `list-changed-files-failed`, `internal-error`. Local commit is still intact for manual recovery.
+   - `auto-push-dry-run` — fired only when `dry_run: true` (config) or `--dry-run` (CLI). Firewall evaluated, no git/gh side effects.
+2. On the GitHub repo, the **Pull requests** tab will list the new draft PR (filter by `is:draft author:@me`).
+
+## Failure modes
+
+The orchestrator never throws. Every failure path returns a structured outcome:
+
+| Failure                          | Outcome                          | Recovery                                                             |
+|----------------------------------|----------------------------------|----------------------------------------------------------------------|
+| `git push` fails (auth, network) | `auto-push-failed/git-push-failed` | Local commit intact; next run retries OR push manually               |
+| `gh pr create` fails             | `auto-push-failed/pr-create-failed`, `pushed: true` | Branch is on origin; create the PR manually with `gh pr create --draft` |
+| Concurrent fleet push race       | Same as above (non-fast-forward) | One machine wins; loser logs and moves on. NEVER `--force`.          |
+| Internal bug in the module       | `auto-push-failed/internal-error` | The dispatcher does not crash. Open a bug.                            |
+
+## Concurrency / race conditions
+
+- Push is `git push origin <branch>` with **no `--force`**. Ever. Concurrent fleet pushes to the same branch get rejected as non-fast-forward, which is correct + non-destructive.
+- Branch names already include the date (`auto/<slug>-<task>-<date>`), and worktrees are per-machine, so collisions on the exact same branch are uncommon and self-resolving.
+
+## Deprecated: `auto_pr`
+
+The `auto_pr` boolean in `config/budget.json` is no longer consulted. After a successful path-firewalled push, a draft PR is **always** opened. There is no longer a separate "push but don't open PR" mode — losing the PR loses the audit trail the future Overseer reads.
+
+The key may be removed from configs in a follow-up cleanup.
+
+## Minimum tooling
+
+- `gh` CLI version 1.0+ (draft PRs have been GA since 2020).
+- GitHub PAT with `repo` scope. `gh auth refresh -s repo` if needed.
+
+## Related
+
+- `worldbuilder/VEYDRIA-VISION.md` — full four-pillar architecture and seven-gate stack.
+- `combo/ai/DECISIONS.md` 2026-04-11 — sandbox portfolio firewall (proposal-only meta-sandbox).
+- `combo/ai/DECISIONS.md` 2026-04-14 — cross-family audit (C-1) requirement.
+- `scripts/lib/auto-push.mjs` — implementation.
+- `scripts/lib/__tests__/auto-push.test.mjs` — test suite.

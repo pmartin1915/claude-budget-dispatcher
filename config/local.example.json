@@ -10,6 +10,7 @@
     "enabled": false
   },
 
+  "$comment_auto_push": "Per-project auto_push opt-in defaults to false. Both per-project AND top-level shared.json auto_push must be true for any push to fire. Empty auto_push_allowlist also blocks (defensive default). See docs/AUTO-PUSH.md.",
   "projects_in_rotation": [
     {
       "slug": "sandbox-canary-test",
@@ -17,7 +18,9 @@
       "clinical_gate": false,
       "sandbox": true,
       "canary": true,
-      "opportunistic_tasks": ["test", "audit", "clean", "docs-gen"]
+      "opportunistic_tasks": ["test", "audit", "clean", "docs-gen"],
+      "auto_push": false,
+      "auto_push_allowlist": []
     }
   ],
 
