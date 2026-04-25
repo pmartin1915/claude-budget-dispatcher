@@ -16,6 +16,11 @@ import {
   isQuotaExhausted,
   mapPalErrorToVerdict,
   findLatestOverseerLabel,
+  findLabelEvents,
+  evaluateCoolingOff,
+  resolveAutoMergeConfig,
+  findRepoEntry,
+  normalizeRepoList,
   providerFamily,
   reviewOnePr,
   runOverseer,
@@ -531,5 +536,732 @@ describe("_trail()", () => {
   it("returns empty for nullish input", () => {
     assert.equal(_trail(null), "");
     assert.equal(_trail(undefined), "");
+  });
+});
+
+// ===========================================================================
+// Gate 6 (Pillar 1 step 4) -- cooling-off + ready-flip + merge.
+// ===========================================================================
+
+// Helpers for gate-6 tests.
+function labelEvent(name, atMs) {
+  return { event: "labeled", label: { name }, created_at: new Date(atMs).toISOString() };
+}
+function commentAt(atMs, body = "lgtm but actually wait") {
+  return { body, created_at: new Date(atMs).toISOString(), user: { login: "perry" } };
+}
+function makeAutoMergePr({ number = 42, sha = "headsha1234", draft = true, labels = ["dispatcher:auto", "model:gemini-2.5-pro", "overseer:approved"] } = {}) {
+  return {
+    number,
+    html_url: `https://github.com/test/repo/pull/${number}`,
+    body: "auto PR\n- **Model:** `gemini-2.5-pro`",
+    draft,
+    head: { sha },
+    labels: labels.map((name) => ({ name })),
+  };
+}
+function mockGistClient({ pending = null, etag = "W/etag1", writeStatus = 200 } = {}) {
+  const calls = { reads: 0, writes: [], lastEtag: null };
+  return {
+    calls,
+    async readPendingMerges() {
+      calls.reads++;
+      return { data: pending, etag };
+    },
+    async writePendingMerges(payload, etagSent) {
+      calls.writes.push({ payload, etag: etagSent });
+      calls.lastEtag = etagSent;
+      if (writeStatus >= 400) return { ok: false, status: writeStatus, reason: "test-fault" };
+      return { ok: true, status: writeStatus };
+    },
+  };
+}
+
+describe("findLabelEvents()", () => {
+  it("returns matching labeled events newest-first", () => {
+    const events = [
+      labelEvent("overseer:approved", NOW - 30 * 60_000),
+      labelEvent("dispatcher:auto", NOW - 60 * 60_000),
+      labelEvent("overseer:approved", NOW - 5 * 60_000),
+      labelEvent("overseer:rejected", NOW - 10 * 60_000),
+    ];
+    const got = findLabelEvents(events, "overseer:approved");
+    assert.equal(got.length, 2);
+    assert.ok(got[0].ts > got[1].ts);
+  });
+  it("returns [] for unknown label", () => {
+    assert.deepEqual(findLabelEvents([], "x"), []);
+    assert.deepEqual(findLabelEvents(null, "x"), []);
+  });
+});
+
+describe("normalizeRepoList() / findRepoEntry()", () => {
+  it("accepts mixed string + object entries; legacy strings are auto_merge-false", () => {
+    const cfg = ["a/b", { owner_repo: "c/d", auto_merge: true, project_slug: "cd" }];
+    assert.deepEqual(normalizeRepoList(cfg), ["a/b", "c/d"]);
+    assert.equal(findRepoEntry(cfg, "a/b"), "a/b");
+    const cd = findRepoEntry(cfg, "c/d");
+    assert.equal(cd.auto_merge, true);
+    assert.equal(cd.project_slug, "cd");
+    assert.equal(findRepoEntry(cfg, "missing"), null);
+  });
+});
+
+describe("resolveAutoMergeConfig()", () => {
+  it("default-to-disabled when either flag is false", () => {
+    assert.equal(resolveAutoMergeConfig({ topLevelAutoMerge: false, repoEntry: { owner_repo: "a/b", auto_merge: true } }).enabled, false);
+    assert.equal(resolveAutoMergeConfig({ topLevelAutoMerge: true,  repoEntry: { owner_repo: "a/b", auto_merge: false } }).enabled, false);
+    assert.equal(resolveAutoMergeConfig({ topLevelAutoMerge: true,  repoEntry: "a/b" }).enabled, false);
+    assert.equal(resolveAutoMergeConfig({ topLevelAutoMerge: true,  repoEntry: null }).enabled, false);
+  });
+  it("enables only when BOTH layers are true", () => {
+    const c = resolveAutoMergeConfig({
+      topLevelAutoMerge: true,
+      repoEntry: { owner_repo: "a/b", auto_merge: true, merge_strategy: "rebase", project_slug: "demo" },
+      coolingOffMinutes: 30,
+      coolingOffMinutesAfterReady: 5,
+    });
+    assert.equal(c.enabled, true);
+    assert.equal(c.mergeStrategy, "rebase");
+    assert.equal(c.projectSlug, "demo");
+    assert.equal(c.coolingOffMinutes, 30);
+    assert.equal(c.coolingOffMinutesAfterReady, 5);
+  });
+  it("clamps merge_strategy to allowed values", () => {
+    const c = resolveAutoMergeConfig({
+      topLevelAutoMerge: true,
+      repoEntry: { owner_repo: "a/b", auto_merge: true, merge_strategy: "shenanigans" },
+    });
+    assert.equal(c.mergeStrategy, "squash");
+  });
+});
+
+describe("evaluateCoolingOff() -- pure state machine", () => {
+  const baseEvents = (approveAtMs) => [labelEvent("overseer:approved", approveAtMs)];
+
+  it("returns skip:auto-merge-not-enabled when disabled", () => {
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr(),
+      events: baseEvents(NOW - 60 * 60_000),
+      comments: [],
+      autoMergeEnabled: false,
+      now: NOW,
+    });
+    assert.equal(r.action, "skip");
+    assert.equal(r.reason, "auto-merge-not-enabled");
+  });
+
+  it("returns skip:no-approve-label when never approved", () => {
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr({ labels: ["dispatcher:auto"] }),
+      events: [],
+      comments: [],
+      autoMergeEnabled: true,
+      now: NOW,
+    });
+    assert.equal(r.action, "skip");
+    assert.equal(r.reason, "no-approve-label");
+  });
+
+  it("returns skip when cooling-off has not yet elapsed", () => {
+    const approveAt = NOW - 10 * 60_000; // 10 min ago
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr(),
+      events: baseEvents(approveAt),
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "skip");
+    assert.match(r.reason, /^cooling-off-not-elapsed:\d+s-remaining$/);
+  });
+
+  it("returns ready-flip when cooling-off has elapsed and PR is draft", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr({ draft: true }),
+      events: baseEvents(approveAt),
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "ready-flip");
+    assert.equal(r.approveAtMs, approveAt);
+  });
+
+  it("blocks when human comment landed AFTER approval", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr(),
+      events: baseEvents(approveAt),
+      comments: [commentAt(approveAt + 5 * 60_000)],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "block");
+    assert.equal(r.reason, "human-comment-after-approval");
+  });
+
+  it("blocks when head SHA advanced after approval (re-review needed)", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr(),
+      events: baseEvents(approveAt),
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      now: NOW,
+      headCommittedAt: new Date(approveAt + 5 * 60_000).toISOString(), // newer than label
+    });
+    assert.equal(r.action, "block");
+    assert.equal(r.reason, "head-advanced-since-approval");
+  });
+
+  it("blocks when PR is no longer draft and bot has not flipped ready (human flipped)", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr({ draft: false }),
+      events: baseEvents(approveAt), // no overseer:ready-flipped sentinel
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "block");
+    assert.equal(r.reason, "pr-not-draft-and-not-flipped-by-bot");
+  });
+
+  it("returns merge when bot has ready-flipped, after-cooling-off elapsed, PR ready", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const readyAt = NOW - 30 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr({ draft: false }),
+      events: [
+        labelEvent("overseer:approved", approveAt),
+        labelEvent("overseer:ready-flipped", readyAt),
+      ],
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      coolingOffMinutesAfterReady: 0,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "merge");
+    assert.equal(r.headSha, "headsha1234");
+  });
+
+  it("blocks when PR was reverted to draft AFTER ready-flip (human convert-to-draft)", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const readyAt = NOW - 30 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr({ draft: true }), // reverted
+      events: [
+        labelEvent("overseer:approved", approveAt),
+        labelEvent("overseer:ready-flipped", readyAt),
+      ],
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      coolingOffMinutesAfterReady: 0,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "block");
+    assert.equal(r.reason, "pr-converted-to-draft-after-ready-flip");
+  });
+
+  it("returns skip when bot has merged already (terminal)", () => {
+    const approveAt = NOW - 60 * 60_000;
+    const r = evaluateCoolingOff({
+      pr: makeAutoMergePr({ draft: false }),
+      events: [
+        labelEvent("overseer:approved", approveAt),
+        labelEvent("overseer:ready-flipped", NOW - 30 * 60_000),
+        labelEvent("overseer:merged", NOW - 25 * 60_000),
+      ],
+      comments: [],
+      autoMergeEnabled: true,
+      coolingOffMinutes: 45,
+      now: NOW,
+      headCommittedAt: new Date(approveAt - 60_000).toISOString(),
+    });
+    assert.equal(r.action, "skip");
+    assert.equal(r.reason, "already-merged-by-overseer");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reviewOnePr() integration tests for gate 6
+// ---------------------------------------------------------------------------
+
+function gateMockGh(opts = {}) {
+  // Extend the existing mockGh with gate-6 methods. setReady/mergePr/listIssueComments.
+  const calls = {
+    list: 0, diff: 0, events: 0, commit: 0, comments: 0,
+    add: [], remove: [], setReady: [], merge: [],
+  };
+  return {
+    calls,
+    async listOpenDispatcherDraftPrs() { calls.list++; return opts.prs ?? []; },
+    async getPrDiff() { calls.diff++; return opts.diff ?? "+x"; },
+    async getIssueEvents() { calls.events++; if (opts.eventsThrows) throw opts.eventsThrows; return opts.events ?? []; },
+    async getHeadCommit() { calls.commit++; if (opts.commitThrows) throw opts.commitThrows; return opts.commit ?? { commit: { committer: { date: new Date(NOW - 24 * 60 * 60_000).toISOString() } } }; },
+    async listIssueComments() { calls.comments++; if (opts.commentsThrows) throw opts.commentsThrows; return opts.comments ?? []; },
+    async addLabel(repo, n, label) { calls.add.push({ repo, n, label }); if (opts.addThrows) throw opts.addThrows; },
+    async removeLabel(repo, n, label) { calls.remove.push({ repo, n, label }); if (opts.removeThrows) throw opts.removeThrows; },
+    async setReady(repo, n) { calls.setReady.push({ repo, n }); if (opts.setReadyThrows) throw opts.setReadyThrows; },
+    async mergePr(repo, n, args) { calls.merge.push({ repo, n, args }); if (opts.mergeThrows) throw opts.mergeThrows; return opts.mergeResp ?? { sha: "mergesha789", merged: true }; },
+  };
+}
+
+describe("reviewOnePr() gate 6 -- auto-merge progression", () => {
+  it("auto_merge:false (label-only mode) takes the existing skip path on already-approved PRs", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "(should not be called)";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr(),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: { enabled: false },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "skipped");
+    assert.match(r.reason, /already-reviewed:overseer:approved/);
+    // No gate-6 side effects
+    assert.equal(gh.calls.setReady.length, 0);
+    assert.equal(gh.calls.merge.length, 0);
+  });
+
+  it("cooling-off not elapsed -> auto-merge-pending log entry, no merge", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 5 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr(),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000, 3_600_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-pending");
+    assert.match(r.reason, /^cooling-off-not-elapsed/);
+    assert.equal(gh.calls.setReady.length, 0);
+    assert.equal(gh.calls.merge.length, 0);
+  });
+
+  it("cooling-off elapsed + draft -> ready-flip + sentinel label, no merge yet", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: true }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-ready-flipped");
+    assert.equal(gh.calls.setReady.length, 1);
+    assert.equal(gh.calls.merge.length, 0);
+    assert.deepEqual(gh.calls.add[0].label, "overseer:ready-flipped");
+  });
+
+  it("post ready-flip + after-cooling-off elapsed + ready -> merge + sentinel + gist write", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const readyAt = NOW - 30 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt), labelEvent("overseer:ready-flipped", readyAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    const gistClient = mockGistClient();
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: false }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000, 3_600_000],
+      },
+      gistClient,
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-merged");
+    assert.equal(gh.calls.merge.length, 1);
+    assert.equal(gh.calls.merge[0].args.mergeMethod, "squash");
+    assert.equal(gh.calls.merge[0].args.sha, "headsha1234");
+    // overseer:merged sentinel must be applied AFTER the merge call.
+    assert.ok(gh.calls.add.some((c) => c.label === "overseer:merged"));
+    // Gist write captured the entry with project_slug + merge SHA.
+    assert.equal(gistClient.calls.writes.length, 1);
+    const written = gistClient.calls.writes[0].payload;
+    assert.equal(written.entries.length, 1);
+    assert.equal(written.entries[0].repo, "a/b");
+    assert.equal(written.entries[0].project_slug, "demo");
+    assert.equal(written.entries[0].merge_commit_sha, "mergesha789");
+    assert.equal(written.entries[0].replays_done, 0);
+    assert.equal(written.schema_version, 1);
+  });
+
+  it("human comment after approval -> auto-merge-blocked, no ready-flip, no merge", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+      comments: [commentAt(approveAt + 10 * 60_000, "actually wait, let me look")],
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr(),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-blocked");
+    assert.equal(r.reason, "human-comment-after-approval");
+    assert.equal(gh.calls.setReady.length, 0);
+    assert.equal(gh.calls.merge.length, 0);
+  });
+
+  it("comments fetch failure -> auto-merge-blocked (default-to-block)", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const err = new Error("network down"); err.status = 502;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+      commentsThrows: err,
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr(),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-blocked");
+    assert.match(r.reason, /comments-fetch-failed/);
+    assert.equal(gh.calls.merge.length, 0);
+  });
+
+  it("PR not draft and bot did not flip ready -> auto-merge-blocked", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)], // no ready-flipped sentinel
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: false }), // human flipped ready early
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-blocked");
+    assert.equal(r.reason, "pr-not-draft-and-not-flipped-by-bot");
+    assert.equal(gh.calls.merge.length, 0);
+  });
+
+  it("merged sentinel present -> skipped silently (terminal, already gate-7's job)", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const gh = gateMockGh({
+      events: [
+        labelEvent("overseer:approved", approveAt),
+        labelEvent("overseer:ready-flipped", NOW - 30 * 60_000),
+        labelEvent("overseer:merged", NOW - 25 * 60_000),
+      ],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: false }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "skipped");
+    assert.equal(r.reason, "already-merged-by-overseer");
+    assert.equal(gh.calls.merge.length, 0);
+  });
+
+  it("PAL HIGH-2: missing gistClient blocks the merge -- gate-7-monitor-not-configured", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const readyAt = NOW - 30 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt), labelEvent("overseer:ready-flipped", readyAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    // gistClient intentionally omitted (operator forgot STATUS_GIST_ID).
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: false }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      // gistClient: undefined,
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-blocked");
+    assert.equal(r.reason, "gate-7-monitor-not-configured");
+    // No merge call, no merged sentinel.
+    assert.equal(gh.calls.merge.length, 0);
+    assert.ok(!gh.calls.add.some((c) => c.label === "overseer:merged"));
+  });
+
+  it("PAL HIGH-1: future-version pending-merges.json refuses write (no schema downgrade)", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const readyAt = NOW - 30 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt), labelEvent("overseer:ready-flipped", readyAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    // Gist returns schema_version: 99 -- a future version we don't recognize.
+    const gistClient = mockGistClient({
+      pending: {
+        schema_version: 99,
+        entries: [{ repo: "a/b", pr_number: 1, future_field: "important", merge_commit_sha: "old" }],
+      },
+    });
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: false }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      gistClient,
+      now: () => NOW,
+    });
+    // Merge happened (the safety net here is gist-side, not merge-side --
+    // the merge was already cleared by gates 1-6).
+    assert.equal(r.outcome, "auto-merge-merged");
+    // But gist was NOT clobbered.
+    assert.equal(gistClient.calls.writes.length, 0, "no v1 write to a v99 gist");
+    assert.match(r.gist_outcome.reason, /^gist-schema-version-newer:remote=99-local=1$/);
+  });
+
+  it("merge fails (e.g. branch protection 405) -> auto-merge-error, no sentinel, no gist write", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const readyAt = NOW - 30 * 60_000;
+    const err = new Error("Method Not Allowed"); err.status = 405;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt), labelEvent("overseer:ready-flipped", readyAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+      mergeThrows: err,
+    });
+    const palCallFn = async () => "";
+    const gistClient = mockGistClient();
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: false }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      gistClient,
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-error");
+    assert.match(r.reason, /merge-failed:405/);
+    assert.equal(gh.calls.merge.length, 1); // attempted
+    assert.ok(!gh.calls.add.some((c) => c.label === "overseer:merged"), "no merged sentinel on failed merge");
+    assert.equal(gistClient.calls.writes.length, 0, "no gist write on failed merge");
+  });
+
+  it("setReady fails (non-422) -> auto-merge-error, no sentinel applied (so next tick retries)", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const err = new Error("forbidden"); err.status = 403;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } },
+      setReadyThrows: err,
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: true }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-error");
+    assert.match(r.reason, /set-ready-failed:403/);
+    assert.equal(gh.calls.setReady.length, 1);
+    // No ready-flipped sentinel was added, so next tick can retry.
+    assert.ok(!gh.calls.add.some((c) => c.label === "overseer:ready-flipped"));
+  });
+
+  it("head SHA advanced past approve label -> auto-merge-blocked, no merge", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const gh = gateMockGh({
+      events: [labelEvent("overseer:approved", approveAt)],
+      commit: { commit: { committer: { date: new Date(approveAt + 10 * 60_000).toISOString() } } },
+    });
+    const palCallFn = async () => "";
+    const r = await reviewOnePr({
+      repo: "a/b",
+      pr: makeAutoMergePr({ draft: true }),
+      gh, palCallFn, appender: ap.fn, maxDiffChars: 50_000,
+      autoMergeConfig: {
+        enabled: true,
+        coolingOffMinutes: 45,
+        coolingOffMinutesAfterReady: 0,
+        mergeStrategy: "squash",
+        projectSlug: "demo",
+        postMergeReplayScheduleMs: [900_000],
+      },
+      now: () => NOW,
+    });
+    assert.equal(r.outcome, "auto-merge-blocked");
+    assert.equal(r.reason, "head-advanced-since-approval");
+    assert.equal(gh.calls.merge.length, 0);
+  });
+});
+
+// runOverseer wiring for the new shape -----------------------------------------
+
+describe("runOverseer() with reposCfg objects", () => {
+  it("resolves per-repo auto_merge from object entries; bare strings stay read-only", async () => {
+    const ap = mockAppender();
+    const approveAt = NOW - 60 * 60_000;
+    const calls = { listed: [] };
+    const gh = {
+      async listOpenDispatcherDraftPrs(repo) {
+        calls.listed.push(repo);
+        // Return one previously-approved draft PR per repo.
+        return [makeAutoMergePr({ number: 7 })];
+      },
+      async getPrDiff() { return "+x"; },
+      async getIssueEvents() { return [labelEvent("overseer:approved", approveAt)]; },
+      async getHeadCommit() { return { commit: { committer: { date: new Date(approveAt - 60_000).toISOString() } } }; },
+      async listIssueComments() { return []; },
+      async addLabel() {},
+      async removeLabel() {},
+      async setReady() {},
+      async mergePr() { return { sha: "msha", merged: true }; },
+    };
+    const palCallFn = async () => JSON.stringify({ verdict: "approved", confidence: "high", summary: "ok", issues: [] });
+    const gistClient = mockGistClient();
+    const results = await runOverseer({
+      reposCfg: [
+        "legacy/readonly",                                                 // string -> auto_merge:false
+        { owner_repo: "opted/in", auto_merge: true, project_slug: "in" },  // object opted-in
+      ],
+      topLevelAutoMerge: true,
+      gh, palCallFn, gistClient, appender: ap.fn,
+      now: () => NOW,
+    });
+    assert.deepEqual(calls.listed, ["legacy/readonly", "opted/in"]);
+    // legacy/readonly: was already approved -> existing skip path (idempotent).
+    const legacy = results.find((r) => r.repo === "legacy/readonly");
+    assert.equal(legacy.outcome, "skipped");
+    // opted/in: cooling-off elapsed, draft -> ready-flip.
+    const opted = results.find((r) => r.repo === "opted/in");
+    assert.equal(opted.outcome, "auto-merge-ready-flipped");
   });
 });

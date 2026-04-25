@@ -28,7 +28,7 @@
     },
     "overseer": {
       "type": "object",
-      "description": "Pillar 1 step 3 -- gate 5 of the seven-gate stack. Read-only Overseer that polls draft PRs labeled dispatcher:auto, runs a cross-family semantic review (C-1), and labels the PR with overseer:approved | overseer:rejected | overseer:abstain. Never merges. Hosting-independent (GitHub Actions cron). See docs/OVERSEER.md.",
+      "description": "Pillar 1 steps 3+4 -- gates 5+6 of the seven-gate stack. Step 3 (gate 5): read-only Overseer polls draft PRs labeled dispatcher:auto, runs cross-family semantic review (C-1), and labels overseer:approved|rejected|abstain. Step 4 (gate 6): when auto_merge is opted in (top-level + per-repo), after cooling_off_minutes elapse the bot flips the PR ready and merges via REST PUT, writing a pending-merge entry to the status gist for gate 7 to replay. Hosting-independent (GitHub Actions cron). See docs/OVERSEER.md and docs/AUTO-MERGE.md.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -36,8 +36,22 @@
         },
         "repos": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1, "pattern": "^[^/]+/[^/]+$" },
-          "description": "List of owner/repo strings to poll. Empty list = no work (Overseer skips). Operator opts in by listing rotation repos here."
+          "items": {
+            "oneOf": [
+              { "type": "string", "minLength": 1, "pattern": "^[^/]+/[^/]+$" },
+              {
+                "type": "object",
+                "required": ["owner_repo"],
+                "properties": {
+                  "owner_repo": { "type": "string", "minLength": 1, "pattern": "^[^/]+/[^/]+$" },
+                  "auto_merge": { "type": "boolean", "description": "Per-repo opt-in for gate 6 (cooling-off + ready-flip + merge). Defaults false. BOTH this AND top-level auto_merge must be true for the bot to merge." },
+                  "merge_strategy": { "type": "string", "enum": ["squash", "rebase", "merge"], "description": "Merge method for gate 6. Default squash. Only squash is fully exercised in v1; rebase/merge are accepted by the schema but the Overseer simply forwards the value to GitHub's PUT /pulls/{n}/merge endpoint." },
+                  "project_slug": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9-]+$", "description": "Maps owner/repo to the dispatcher's project slug (one of projects_in_rotation[].slug). Required for gate 7 -- the dispatcher needs project_slug to look up the local project path for the canary replay and to flip auto_push:false on auto-suspend." }
+                }
+              }
+            ]
+          },
+          "description": "Repos to poll. Strings are legacy and treated as auto_merge:false. Object form carries the per-repo auto_merge / merge_strategy / project_slug needed for gate 6+7."
         },
         "review_model": {
           "type": "string",
@@ -55,6 +69,27 @@
           "description": "Reserved for a future tightening: force abstain when the audit model's reported confidence is below this floor."
         }
       }
+    },
+    "auto_merge": {
+      "type": "boolean",
+      "description": "Pillar 1 step 4 -- gate 6 fleet kill switch. BOTH this AND per-repo overseer.repos[].auto_merge must be true for the Overseer to merge. Default false (mechanism stays dormant)."
+    },
+    "cooling_off_minutes": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1440,
+      "description": "Gate 6 wait between overseer:approved and the bot's ready-flip. Cron tick after this elapses the bot proceeds. Any human comment / draft-state-change / fresh push during this window blocks the merge. Default 45."
+    },
+    "cooling_off_minutes_after_ready": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1440,
+      "description": "Gate 6 wait between the bot's ready-flip and the merge call. Default 0 -- merge happens in the same cron tick as ready-flip when the after-window is zero."
+    },
+    "post_merge_canary_replay_schedule_min": {
+      "type": "array",
+      "items": { "type": "number", "minimum": 0 },
+      "description": "Gate 7 replay schedule in MINUTES from the merge time. Default [15, 60, 240, 1440] (T+15m, T+1h, T+4h, T+24h). Translated to ms by the Overseer when writing the pending-merges gist entry."
     },
     "status_gist_id": {
       "type": "string"

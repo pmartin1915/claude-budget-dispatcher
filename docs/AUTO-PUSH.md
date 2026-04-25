@@ -160,7 +160,7 @@ The orchestrator never throws. Every failure path returns a structured outcome:
 
 After the path firewall (gate 1), tests (gate 2), in-line cross-family audit (gate 3), and canary (gate 4) all clear and the draft PR is open, an out-of-band **Overseer** loop runs every 2h on GitHub Actions. It reads the diff and the PR body together and asks a model from the **opposite family** of whatever generated the PR (per C-1 anti-monoculture, `combo/ai/DECISIONS.md` 2026-04-14): *did this change actually achieve what the bot claimed?*
 
-Read-only by design: the Overseer **labels** the PR with one of three verdicts but does NOT mark ready or merge. Auto-merge is gated on cooling-off (gate 6) and post-merge canary monitor (gate 7), shipping in a later session.
+Read-only by default: the Overseer **labels** the PR with one of three verdicts. When `auto_merge: true` is set at BOTH the top-level (`config/shared.json`) AND in the per-repo `overseer.repos[]` entry (object form), gate 6 (cooling-off + ready-flip + merge) and gate 7 (post-merge canary monitor) take over. See `AUTO-MERGE.md` for the gate-6+7 lifecycle, opt-in procedure, and auto-suspend semantics. Without explicit opt-in, the bot stays in label-only mode forever.
 
 ### What the labels mean (for an operator deciding whether to merge)
 

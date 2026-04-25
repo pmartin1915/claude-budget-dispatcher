@@ -37,9 +37,12 @@ const LABELS = [
   { name: "model:mistral-large-latest", color: "D93F0B", desc: "Mistral Large" },
   { name: "model:codestral-latest",   color: "D93F0B", desc: "Codestral" },
   // Pillar 1 step 3 -- gate 5 (Overseer, read-only).
-  { name: "overseer:approved",        color: "0E8A16", desc: "Overseer cross-family review approved (read-only; human still merges)" },
+  { name: "overseer:approved",        color: "0E8A16", desc: "Overseer cross-family review approved" },
   { name: "overseer:rejected",        color: "B60205", desc: "Overseer cross-family review rejected" },
   { name: "overseer:abstain",         color: "FBCA04", desc: "Overseer abstained (low confidence, ambiguous family, or quota-exhausted)" },
+  // Pillar 1 step 4 -- gate 6 (cooling-off + ready-flip + merge) sentinels.
+  { name: "overseer:ready-flipped",   color: "1F8FFF", desc: "Bot flipped the PR ready after cooling-off; auto-merge is queued for the next tick" },
+  { name: "overseer:merged",          color: "5319E7", desc: "Bot merged the PR; gate 7 owns the post-merge canary replay" },
 ];
 
 function loadRotation() {

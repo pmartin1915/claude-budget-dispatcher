@@ -1,7 +1,9 @@
-# Dispatcher Overseer (Pillar 1 step 3 — gate 5)
+# Dispatcher Overseer (Pillar 1 steps 3+4 — gates 5+6)
 
-Read-only out-of-band reviewer for dispatcher-authored draft PRs.
-Gate 5 of the seven-gate stack from `worldbuilder/VEYDRIA-VISION.md` Pillar 3.
+Out-of-band reviewer for dispatcher-authored draft PRs.
+Gates 5 (read-only review) + 6 (cooling-off + ready-flip + merge) of the seven-gate stack from `worldbuilder/VEYDRIA-VISION.md` Pillar 3.
+
+> Gate 5 is **always on** when the Overseer is enabled — labels every draft PR with `overseer:approved | overseer:rejected | overseer:abstain`. Gate 6 (auto-merge) is dormant by default and requires explicit opt-in at both `auto_merge: true` (top-level) AND per-repo `auto_merge: true`. See `AUTO-MERGE.md` for the gate-6 lifecycle, opt-in procedure, and operator action matrix.
 
 ## Why this exists
 
@@ -16,9 +18,11 @@ The Overseer reads the diff and the PR body together and asks a model from the
 **opposite family** of whatever generated the PR: *did this change actually do
 what the bot said it would?*
 
-Read-only first: the Overseer **labels** the PR with its verdict but does not
-mark it ready or merge. Auto-merge is gated on cooling-off (gate 6) and a
-post-merge canary monitor (gate 7), shipping in a later session.
+Read-only by default: the Overseer **labels** the PR with its verdict. When
+`auto_merge: true` is set at BOTH the top level and the per-repo entry in
+`overseer.repos`, the bot enters gate 6: cooling-off, ready-flip, merge. The
+label-only mode remains the fallback path; any project not opted in stays
+advisory-only. See `AUTO-MERGE.md` for gate-6 details.
 
 ## How it works
 
@@ -130,9 +134,11 @@ The "Run Overseer" step prints one line per processed PR:
 
 | Label | What it means | What you should do |
 |---|---|---|
-| `overseer:approved` | Audit model says diff matches the PR body's claim and no semantic regression was detected. | You can mark ready and merge. The label is *advisory* — manual review still recommended for non-trivial changes. |
-| `overseer:rejected` | Audit model says the diff breaks the body's claim or introduces a critical regression. | Read the JSONL `summary` field. Either close the PR or push a fixup commit (which retriggers review on next cron tick). |
-| `overseer:abstain` | Audit model couldn't decide — low confidence, ambiguous family, or quota-exhausted. | Manual review required. The label is **not** a failure signal; it's just *"the bot couldn't help here"*. |
+| `overseer:approved` | Audit model says diff matches the PR body's claim and no semantic regression was detected. | If `auto_merge: true` is opted in for this repo, the bot will ready-flip + merge after `cooling_off_minutes` (default 45). Otherwise, the label is *advisory* and manual review/merge is still required. See `AUTO-MERGE.md`. |
+| `overseer:rejected` | Audit model says the diff breaks the body's claim or introduces a critical regression. | Read the JSONL `summary` field. Either close the PR or push a fixup commit (which retriggers review on next cron tick). Auto-merge is NEVER triggered on rejected PRs regardless of opt-in. |
+| `overseer:abstain` | Audit model couldn't decide — low confidence, ambiguous family, or quota-exhausted. | Manual review required. The label is **not** a failure signal; it's just *"the bot couldn't help here"*. Auto-merge is NEVER triggered on abstained PRs. |
+| `overseer:ready-flipped` | **Sentinel** (gate 6). The bot flipped the PR ready-for-review after cooling-off elapsed and is queued to merge on the next tick (or immediately if `cooling_off_minutes_after_ready: 0`). | None — bot owns the next step. To intervene, leave a comment or convert back to draft; either signal blocks the merge. |
+| `overseer:merged` | **Sentinel** (gate 6). The bot merged the PR. Gate 7 (post-merge canary monitor) now owns the next 24h. | None — watch for `post-merge-canary` outcomes in JSONL. A failed replay will auto-suspend `auto_push` for the project's slug. See `AUTO-MERGE.md`. |
 
 ## Disabling
 
