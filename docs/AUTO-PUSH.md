@@ -1,6 +1,6 @@
-# Auto-Push (Pillar 1 step 1)
+# Auto-Push (Pillar 1 steps 1+2)
 
-Path-firewalled push of `auto/<slug>-<task>-<date>` branches to `origin` plus a draft PR for the future Overseer. Gate 1 of the seven-gate stack from `worldbuilder/VEYDRIA-VISION.md` Pillar 3.
+Path-firewalled push of `auto/<slug>-<task>-<date>` branches to `origin` plus a draft PR for the future Overseer. Gates 1 (path firewall) and 4 (canary success) of the seven-gate stack from `worldbuilder/VEYDRIA-VISION.md` Pillar 3.
 
 ## Default state
 
@@ -8,12 +8,13 @@ The mechanism ships **dormant** on all rotation projects. Top-level `auto_push: 
 
 ## Kill-switch ladder (defense-in-depth)
 
-A push fires only if **all four** layers pass:
+A push fires only if **all five** layers pass:
 
 1. **Fleet flag** — top-level `auto_push: true` in `config/budget.json`.
 2. **Project flag** — `projects_in_rotation[i].auto_push: true`.
 3. **Non-empty allowlist** — `projects_in_rotation[i].auto_push_allowlist` has at least one pattern. Empty array always blocks (defensive default — prevents the footgun of opting in without listing eligible paths).
 4. **All changed files match allowlist AND match no protected glob** — see "Path firewall" below.
+5. **Canary command passes** — `projects_in_rotation[i].canary_command` is configured AND exits 0 within `canary_timeout_ms` — see "Canary gate (gate 4)" below. Missing `canary_command` on an opted-in project blocks the push (footgun guard).
 
 Flip the fleet flag to `false` to disable everything across the fleet instantly without touching per-project config.
 
@@ -53,6 +54,48 @@ Examples:
 Edit `auto_push_protected_globs` in `config/budget.json` to extend. Adding to or modifying this list is **never** an autonomous operation — it requires a human-reviewed PR. The dispatcher cannot edit its own protected-globs list.
 
 A hardcoded fallback list with the same six entries lives in `scripts/lib/auto-push.mjs` as `FALLBACK_PROTECTED_GLOBS`. If the config field is missing or empty, the fallback is used. Defense-in-depth: a config typo cannot disable protection.
+
+## Canary gate (gate 4)
+
+After the path firewall passes and before `git push` runs, the dispatcher executes the project's canary command in the worktree. Non-zero exit, timeout, or spawn-error blocks the push and preserves the local commit and branch — same fail-soft posture as the firewall.
+
+### Configuration
+
+```json
+{
+  "slug": "engine-2d",
+  "auto_push": true,
+  "auto_push_allowlist": ["src/**", "tests/**"],
+  "canary_command": ["npm.cmd", "run", "canary"],
+  "canary_timeout_ms": 120000
+}
+```
+
+- **`canary_command`** is **required** when `auto_push: true`. Missing canary on an opted-in project blocks the push with `reason: "canary-not-configured"` (footgun guard — opting in without proof-the-engine-works is not allowed).
+- **Must be an array of strings** (argv form). Single-string form like `"npm run canary"` is rejected by the JSON schema. The runner spawns with `shell: false` to close the config-injection vector — there is no path where a config string flows to a shell.
+- **`canary_timeout_ms`** defaults to `120000` (2 min) when absent. Hard cap `600000` (10 min). On timeout, the process tree is killed via `taskkill /T /F /PID` (Windows) or `kill -SIGKILL` on the process group (POSIX, child spawned with `detached: true`).
+- **Windows note:** `spawn(..., { shell: false })` does **not** auto-resolve `npm` to `npm.cmd`. Use `["npm.cmd", "run", "canary"]` or an absolute path. Bare `["npm", "run", "canary"]` will spawn-error on Windows.
+
+### Outcomes
+
+| Outcome | Reason | Failure mode | Recovery |
+|---|---|---|---|
+| `auto-push-blocked` | `canary-not-configured` | n/a | Add `canary_command` to the project's `projects_in_rotation` entry. |
+| `auto-push-blocked` | `canary-failed` | `non-zero` | Reproduce locally: `cd <worktree> && <canary_command>`. Fix the test or the regression. |
+| `auto-push-blocked` | `canary-failed` | `timeout` | Increase `canary_timeout_ms` if the canary is genuinely slow; otherwise diagnose the hang. |
+| `auto-push-blocked` | `canary-failed` | `spawn-error` | Command not found or wrong argv shape (e.g. `["npm", ...]` instead of `["npm.cmd", ...]` on Windows). |
+| `auto-push-dry-run` | n/a | n/a | When canary is configured, the log entry has `canary_skipped: "dry-run"`. |
+
+Each `canary-failed` log entry carries `failure_mode`, `exit_code`, `duration_ms`, `timedOut`, `stdout_tail` (≤500 chars), `stderr_tail` (≤500 chars), and the `canary_command` argv array.
+
+### Testing the canary locally
+
+```bash
+cd <worktree-or-repo-path>
+# Run the same argv array your canary_command holds:
+npm.cmd run canary    # or whatever the configured argv resolves to
+echo $?               # 0 = pass; the dispatcher accepts only 0
+```
 
 ### Permanent never-auto-push (per `worldbuilder/VEYDRIA-VISION.md`)
 

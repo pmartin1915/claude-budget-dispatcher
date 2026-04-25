@@ -27,13 +27,23 @@
 //   literal -> regex metachars escaped
 //   Anchored ^...$. Case-sensitive (security boundary; do not lowercase).
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import {
   writeFileSync as nodeWriteFileSync,
   unlinkSync as nodeUnlinkSync,
 } from "node:fs";
 import { resolve as nodeResolve } from "node:path";
 import { tmpdir } from "node:os";
+
+// Default canary timeout when projectConfig.canary_timeout_ms is absent.
+// 2 minutes covers typical npm-test-style smoke runs without letting a
+// hung canary block dispatcher progress for long.
+const DEFAULT_CANARY_TIMEOUT_MS = 120_000;
+
+// Trail-limit applied to canary stdout/stderr in JSONL log entries. Keeps
+// the log grepable and bounds the per-entry size; the tail (slice(-MAX))
+// preserves the most-recent output where errors typically surface.
+const CANARY_OUTPUT_TAIL_MAX = 500;
 
 // Hardcoded fallback. A config typo deleting auto_push_protected_globs cannot
 // disable these protections. Defense-in-depth: the in-config list is canonical
@@ -160,11 +170,143 @@ export function evaluatePathFirewall({ changedFiles, allowlist, protectedGlobs }
 }
 
 /**
+ * Pure. Resolve the canary configuration for an opted-in project.
+ * Returns { command, timeoutMs } when canary_command is a non-empty array,
+ * else null (caller decides whether null = block or allow).
+ *
+ * @param {object} projectConfig
+ * @returns {{ command: string[], timeoutMs: number } | null}
+ */
+export function evaluateCanary(projectConfig) {
+  const command = projectConfig?.canary_command;
+  if (!Array.isArray(command) || command.length === 0) return null;
+  for (const arg of command) {
+    if (typeof arg !== "string" || arg.length === 0) return null;
+  }
+  const raw = projectConfig?.canary_timeout_ms;
+  const timeoutMs = Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_CANARY_TIMEOUT_MS;
+  return { command, timeoutMs };
+}
+
+// Trail-limit a string to its last `max` chars. Tail-preserving because canary
+// failures typically print the actual error at the end of stdout/stderr.
+function _trail(s, max = CANARY_OUTPUT_TAIL_MAX) {
+  if (!s) return "";
+  const str = String(s);
+  return str.length > max ? str.slice(-max) : str;
+}
+
+/**
+ * Default canary runner. Process-tree-safe per DECISIONS.md 2026-04-14 R-2:
+ * spawn + setTimeout + taskkill /T /F (Windows) or process.kill(-pid, SIGKILL)
+ * (POSIX). shell:false is the config-injection guard -- canary_command is an
+ * array enforced by schema, so no shell expansion ever runs.
+ *
+ * Return shape: { exitCode, stdout, stderr, timedOut, durationMs, spawnError }
+ *   - exitCode: number on clean exit, null on timeout or spawn-error
+ *   - stdout/stderr: full captured output (caller trail-limits for log)
+ *   - timedOut: true iff the timer fired and we killed the tree
+ *   - durationMs: wall-clock from spawn to resolve
+ *   - spawnError: true iff spawn threw or the child errored before close
+ *
+ * @param {string} workingDir - worktree path (cwd for the canary process)
+ * @returns {(command: string[], opts: { timeoutMs: number }) => Promise<object>}
+ */
+function _defaultCanaryRunner(workingDir) {
+  return function runCanary(command, { timeoutMs }) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      const stdoutChunks = [];
+      const stderrChunks = [];
+      let timedOut = false;
+      let resolved = false;
+      const safeResolve = (payload) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(payload);
+      };
+
+      let child;
+      try {
+        // shell:false: argv array form, no shell expansion (config-injection guard).
+        // Schema enforces minItems:1 so command[0] is always present.
+        child = spawn(command[0], command.slice(1), {
+          cwd: workingDir,
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: false,
+          // POSIX: detached:true puts the child in its own process group so
+          // process.kill(-pid, "SIGKILL") below kills the whole tree. Windows
+          // ignores this; tree-kill there uses taskkill /T /F.
+          detached: process.platform !== "win32",
+        });
+      } catch (e) {
+        safeResolve({
+          exitCode: null,
+          stdout: "",
+          stderr: String(e?.message ?? e),
+          timedOut: false,
+          durationMs: Date.now() - t0,
+          spawnError: true,
+        });
+        return;
+      }
+
+      child.stdout?.on("data", (d) => stdoutChunks.push(d));
+      child.stderr?.on("data", (d) => stderrChunks.push(d));
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          if (process.platform === "win32") {
+            // Async fire-and-forget: taskkill can stall under AV interception.
+            execFile(
+              "taskkill",
+              ["/T", "/F", "/PID", String(child.pid)],
+              { timeout: 10_000 },
+              () => {}
+            );
+          } else {
+            // Negative pid -> kill the process group (requires detached:true above).
+            process.kill(-child.pid, "SIGKILL");
+          }
+        } catch {
+          // Best-effort: child may have already exited.
+        }
+      }, timeoutMs);
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        safeResolve({
+          exitCode: timedOut ? null : code,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8"),
+          timedOut,
+          durationMs: Date.now() - t0,
+          spawnError: false,
+        });
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        safeResolve({
+          exitCode: null,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: (Buffer.concat(stderrChunks).toString("utf8") + (err?.message ?? "")),
+          timedOut: false,
+          durationMs: Date.now() - t0,
+          spawnError: true,
+        });
+      });
+    });
+  };
+}
+
+/**
  * Default execFileSync-backed clients. dispatch.mjs calls this once per dispatch
  * and threads the result into maybeAutoPush. Tests pass plain mock objects.
  *
  * @param {string} workingDir - cwd for git/gh subprocesses (worktree path).
- * @returns {{ gitClient: object, ghClient: object }}
+ * @returns {{ gitClient: object, ghClient: object, canaryRunner: function }}
  */
 export function createDefaultClients(workingDir) {
   return {
@@ -221,6 +363,7 @@ export function createDefaultClients(workingDir) {
         });
       },
     },
+    canaryRunner: _defaultCanaryRunner(workingDir),
   };
 }
 
@@ -240,7 +383,8 @@ export function createDefaultClients(workingDir) {
  * @param {string} args.workingDir            -- worktree path (cwd for git/gh)
  * @param {object} args.gitClient             -- { push, listChangedFiles }
  * @param {object} args.ghClient              -- { createDraftPr, addLabels }
- * @param {boolean} [args.dryRun=false]       -- if true, evaluate firewall but skip git/gh
+ * @param {function} [args.canaryRunner]      -- (command, { timeoutMs }) => Promise<{ exitCode, stdout, stderr, timedOut, durationMs, spawnError }>
+ * @param {boolean} [args.dryRun=false]       -- if true, evaluate firewall but skip git/gh AND skip canary
  * @param {object} [args.logger]              -- { appendLog }; missing = no-op logger
  * @param {object} [args.fs]                  -- { writeFileSync, unlinkSync }; default = node:fs
  * @returns {Promise<object>} structured outcome
@@ -257,6 +401,7 @@ export async function maybeAutoPush({
   workingDir,
   gitClient,
   ghClient,
+  canaryRunner,
   dryRun = false,
   logger,
   fs,
@@ -334,17 +479,96 @@ export async function maybeAutoPush({
       return result;
     }
 
-    // 5. Dry-run short-circuit (after firewall, before any git/gh side effects).
+    // 5. Dry-run short-circuit (after firewall, before any git/gh side effects
+    //    AND before canary execution -- dry-run must not invoke the project's
+    //    canary). When canary is configured, surface that fact in the log so
+    //    operators can verify the configuration without firing the canary.
     if (dryRun) {
+      const canaryDryRun = evaluateCanary(projectConfig);
       const result = {
         outcome: "auto-push-dry-run",
         changed_file_count: changedFiles.length,
+      };
+      if (canaryDryRun) {
+        result.canary_skipped = "dry-run";
+      }
+      writeLog(result);
+      return result;
+    }
+
+    // 6. Canary gate (gate 4 of the seven-gate stack).
+    //
+    //    Default-to-block invariant: an opted-in project with no canary_command
+    //    is a footgun (auto-push without proof the engine works), so we block
+    //    rather than fall through to push.
+    const canaryConfig = evaluateCanary(projectConfig);
+    if (!canaryConfig) {
+      const result = {
+        outcome: "auto-push-blocked",
+        reason: "canary-not-configured",
       };
       writeLog(result);
       return result;
     }
 
-    // 6. Push.
+    // Run the canary in the worktree. Runner is process-tree-safe per R-2 and
+    // never throws -- it returns a structured shape on every path (clean exit,
+    // non-zero exit, timeout, spawn-error). Defensive guard: if no runner was
+    // injected, treat as spawn-error so the push is blocked rather than skipped.
+    let canaryResult;
+    if (typeof canaryRunner !== "function") {
+      canaryResult = {
+        exitCode: null,
+        stdout: "",
+        stderr: "no canaryRunner injected",
+        timedOut: false,
+        durationMs: 0,
+        spawnError: true,
+      };
+    } else {
+      try {
+        canaryResult = await canaryRunner(canaryConfig.command, {
+          timeoutMs: canaryConfig.timeoutMs,
+        });
+      } catch (e) {
+        canaryResult = {
+          exitCode: null,
+          stdout: "",
+          stderr: String(e?.message ?? e),
+          timedOut: false,
+          durationMs: 0,
+          spawnError: true,
+        };
+      }
+    }
+
+    const canaryFailed =
+      canaryResult.timedOut === true ||
+      canaryResult.spawnError === true ||
+      canaryResult.exitCode !== 0;
+
+    if (canaryFailed) {
+      const failure_mode = canaryResult.timedOut
+        ? "timeout"
+        : canaryResult.spawnError
+        ? "spawn-error"
+        : "non-zero";
+      const result = {
+        outcome: "auto-push-blocked",
+        reason: "canary-failed",
+        failure_mode,
+        canary_command: canaryConfig.command,
+        exit_code: canaryResult.exitCode ?? null,
+        timedOut: canaryResult.timedOut === true,
+        duration_ms: canaryResult.durationMs ?? 0,
+        stdout_tail: _trail(canaryResult.stdout),
+        stderr_tail: _trail(canaryResult.stderr),
+      };
+      writeLog(result);
+      return result;
+    }
+
+    // 7. Push.
     try {
       gitClient.push(branch);
     } catch (e) {
@@ -357,7 +581,7 @@ export async function maybeAutoPush({
       return result;
     }
 
-    // 7. Build PR body, write to temp file, open as draft.
+    // 8. Build PR body, write to temp file, open as draft.
     // Sanitize newlines from the summary so the title stays single-line; embedded
     // \n in CLI args can break gh's invocation and produce malformed PR titles.
     const summaryForTitle = (finalResult?.summary ?? "auto dispatch")
@@ -387,7 +611,7 @@ export async function maybeAutoPush({
       return result;
     }
 
-    // 8. Best-effort label add. Never affects outcome (PR is the real artifact).
+    // 9. Best-effort label add. Never affects outcome (PR is the real artifact).
     if (prUrl) {
       try {
         const labels = [

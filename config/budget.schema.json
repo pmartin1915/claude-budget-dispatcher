@@ -318,6 +318,18 @@
             "type": "array",
             "items": { "type": "string", "minLength": 1 },
             "description": "Glob patterns whose matching paths are eligible for auto-push. Empty array blocks all pushes regardless of auto_push value (footgun guard). Patterns ANDed with global auto_push_protected_globs which always wins."
+          },
+          "canary_command": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1,
+            "description": "Gate 4 (canary success). Argv-form command (e.g. [\"npm.cmd\", \"run\", \"canary\"]). Runs in the worktree between path-firewall pass and git push. Non-zero exit, timeout, or spawn-error blocks the push and preserves the local commit. Required when auto_push is true: missing canary_command on an opted-in project blocks the push (footgun guard). Array form is mandatory: spawn runs with shell:false to close the config-injection vector. Windows: spawn(shell:false) does not auto-resolve npm to npm.cmd, so use the .cmd extension explicitly or an absolute path."
+          },
+          "canary_timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 600000,
+            "description": "Hard timeout for canary_command in milliseconds. Default 120000 (2 min) when absent. On timeout, the process tree is killed via taskkill /T /F (Windows) or SIGKILL on the process group (POSIX) and the push is blocked with reason='canary-failed', failure_mode='timeout'."
           }
         }
       }

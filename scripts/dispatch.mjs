@@ -351,6 +351,7 @@ async function main() {
       workingDir,
       gitClient: apClients.gitClient,
       ghClient: apClients.ghClient,
+      canaryRunner: apClients.canaryRunner,
       dryRun,
       logger: { appendLog },
     });

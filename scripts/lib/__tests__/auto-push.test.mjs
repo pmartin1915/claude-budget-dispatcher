@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   matchGlob,
   evaluatePathFirewall,
+  evaluateCanary,
   maybeAutoPush,
   FALLBACK_PROTECTED_GLOBS,
 } from "../auto-push.mjs";
@@ -74,12 +75,35 @@ function fakeBuildPrBody(finalResult, selection /* , route */) {
   return `# auto-PR\n- task: ${selection?.task}\n- summary: ${finalResult?.summary ?? ""}\n`;
 }
 
+// Default canary runner mock. Override fields for failure-mode tests.
+function mockRunner({
+  exitCode = 0,
+  stdout = "",
+  stderr = "",
+  timedOut = false,
+  durationMs = 100,
+  spawnError = false,
+} = {}) {
+  const calls = [];
+  return {
+    fn: async (command, opts) => {
+      calls.push({ command, opts });
+      return { exitCode, stdout, stderr, timedOut, durationMs, spawnError };
+    },
+    calls,
+  };
+}
+
 const baseHappyArgs = () => ({
   branch: "auto/test-task-2026-04-26",
   project: "test-project",
   projectConfig: {
     auto_push: true,
     auto_push_allowlist: ["src/**", "tests/**", "CHANGELOG.md"],
+    // Gate 4: opted-in projects must declare a canary. Tests inject a mock
+    // runner so no real subprocess fires.
+    canary_command: ["echo", "ok"],
+    canary_timeout_ms: 5000,
   },
   globalConfig: {
     auto_push: true,
@@ -221,10 +245,12 @@ describe("maybeAutoPush()", () => {
     const gh = mockGh({ url: "https://github.com/test/repo/pull/42" });
     const log = mockLogger();
     const fs = mockFs();
+    const runner = mockRunner({ exitCode: 0 });
     const result = await maybeAutoPush({
       ...args,
       gitClient: git,
       ghClient: gh,
+      canaryRunner: runner.fn,
       logger: log,
       fs,
     });
@@ -284,10 +310,12 @@ describe("maybeAutoPush()", () => {
     });
     const gh = mockGh();
     const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0 });
     const result = await maybeAutoPush({
       ...args,
       gitClient: git,
       ghClient: gh,
+      canaryRunner: runner.fn,
       logger: log,
       fs: mockFs(),
     });
@@ -308,10 +336,12 @@ describe("maybeAutoPush()", () => {
     const git = mockGit({ files: ["src/a.js"] });
     const gh = mockGh({ createThrows: new Error("API rate limit exceeded") });
     const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0 });
     const result = await maybeAutoPush({
       ...args,
       gitClient: git,
       ghClient: gh,
+      canaryRunner: runner.fn,
       logger: log,
       fs: mockFs(),
     });
@@ -326,6 +356,210 @@ describe("maybeAutoPush()", () => {
     assert.equal(log.calls[0].outcome, "auto-push-failed");
     assert.equal(log.calls[0].reason, "pr-create-failed");
     assert.equal(log.calls[0].pushed, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maybeAutoPush() canary gate (gate 4) -- 5 tests
+// ---------------------------------------------------------------------------
+
+describe("maybeAutoPush() canary gate (gate 4)", () => {
+  it("missing canary_command on opted-in project -> blocked/canary-not-configured (default-to-block, no git/gh calls)", async () => {
+    // PAL focus #5: footgun guard. Setting auto_push:true without a canary
+    // must NOT silently push.
+    const args = baseHappyArgs();
+    delete args.projectConfig.canary_command;
+    delete args.projectConfig.canary_timeout_ms;
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0 });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "canary-not-configured");
+    assert.equal(runner.calls.length, 0);
+    assert.equal(git.pushCalls.length, 0);
+    assert.equal(gh.createCalls.length, 0);
+    assert.equal(log.calls.length, 1);
+    assert.equal(log.calls[0].outcome, "auto-push-blocked");
+    assert.equal(log.calls[0].reason, "canary-not-configured");
+    assert.equal(log.calls[0].phase, "auto-push");
+  });
+
+  it("canary exits 0 -> push proceeds; runner invoked once with argv array and configured timeout", async () => {
+    const args = baseHappyArgs();
+    args.projectConfig.canary_command = ["node", "-e", "process.exit(0)"];
+    args.projectConfig.canary_timeout_ms = 7500;
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh({ url: "https://github.com/test/repo/pull/7" });
+    const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0, stdout: "ok\n" });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-success");
+    assert.equal(result.pr_url, "https://github.com/test/repo/pull/7");
+    // Runner called once with argv form (not a shell string) and the configured timeout.
+    assert.equal(runner.calls.length, 1);
+    assert.deepEqual(runner.calls[0].command, ["node", "-e", "process.exit(0)"]);
+    assert.equal(runner.calls[0].opts.timeoutMs, 7500);
+    assert.equal(git.pushCalls.length, 1);
+    assert.equal(gh.createCalls.length, 1);
+  });
+
+  it("canary exits non-zero -> blocked/canary-failed with failure_mode=non-zero, exit_code, stdout_tail, stderr_tail; no git/gh calls", async () => {
+    const args = baseHappyArgs();
+    args.projectConfig.canary_command = ["false"];
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const runner = mockRunner({
+      exitCode: 1,
+      stdout: "x",
+      stderr: "boom\n",
+      durationMs: 42,
+    });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "canary-failed");
+    assert.equal(result.failure_mode, "non-zero");
+    assert.equal(result.exit_code, 1);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.stdout_tail, "x");
+    assert.equal(result.stderr_tail, "boom\n");
+    assert.equal(result.duration_ms, 42);
+    assert.deepEqual(result.canary_command, ["false"]);
+    // PAL focus #5: zero git/gh side effects on canary failure.
+    assert.equal(git.pushCalls.length, 0);
+    assert.equal(gh.createCalls.length, 0);
+    // Single structured log entry on the auto-push phase.
+    assert.equal(log.calls.length, 1);
+    assert.equal(log.calls[0].failure_mode, "non-zero");
+    assert.equal(log.calls[0].exit_code, 1);
+    assert.equal(log.calls[0].stderr_tail, "boom\n");
+  });
+
+  it("canary times out -> blocked/canary-failed with failure_mode=timeout, timedOut:true, partial output captured (PAL focus #2)", async () => {
+    const args = baseHappyArgs();
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const runner = mockRunner({
+      exitCode: null,
+      stdout: "partial-out",
+      stderr: "partial-err",
+      timedOut: true,
+      durationMs: 5000,
+    });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "canary-failed");
+    assert.equal(result.failure_mode, "timeout");
+    assert.equal(result.timedOut, true);
+    assert.equal(result.exit_code, null);
+    // Partial output preserved under timeout (PAL focus #2).
+    assert.equal(result.stdout_tail, "partial-out");
+    assert.equal(result.stderr_tail, "partial-err");
+    assert.equal(result.duration_ms, 5000);
+    assert.equal(git.pushCalls.length, 0);
+    assert.equal(gh.createCalls.length, 0);
+    assert.equal(log.calls[0].failure_mode, "timeout");
+    assert.equal(log.calls[0].timedOut, true);
+  });
+
+  it("dryRun=true short-circuits BEFORE canary; runner not called; outcome carries canary_skipped='dry-run'", async () => {
+    const args = baseHappyArgs();
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0 });
+    const result = await maybeAutoPush({
+      ...args,
+      dryRun: true,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-dry-run");
+    assert.equal(result.canary_skipped, "dry-run");
+    assert.equal(result.changed_file_count, 1);
+    // Runner is never invoked under dry-run.
+    assert.equal(runner.calls.length, 0);
+    assert.equal(git.pushCalls.length, 0);
+    assert.equal(gh.createCalls.length, 0);
+    assert.equal(log.calls[0].canary_skipped, "dry-run");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// evaluateCanary() pure-function unit tests -- 2 tests (config-shape coverage)
+// ---------------------------------------------------------------------------
+
+describe("evaluateCanary()", () => {
+  it("returns null for missing/empty/non-array commands; rejects non-string entries", () => {
+    assert.equal(evaluateCanary({}), null);
+    assert.equal(evaluateCanary({ canary_command: [] }), null);
+    assert.equal(evaluateCanary({ canary_command: "npm run canary" }), null); // string form rejected
+    assert.equal(evaluateCanary({ canary_command: null }), null);
+    assert.equal(evaluateCanary({ canary_command: ["npm", 42] }), null); // non-string entry
+    assert.equal(evaluateCanary({ canary_command: ["npm", ""] }), null); // empty string entry
+  });
+
+  it("applies 120000ms default when canary_timeout_ms missing/invalid; respects integer values", () => {
+    assert.equal(
+      evaluateCanary({ canary_command: ["npm.cmd", "run", "canary"] }).timeoutMs,
+      120_000
+    );
+    assert.equal(
+      evaluateCanary({ canary_command: ["a"], canary_timeout_ms: 30_000 }).timeoutMs,
+      30_000
+    );
+    // Non-integer / non-positive => default
+    assert.equal(
+      evaluateCanary({ canary_command: ["a"], canary_timeout_ms: 0 }).timeoutMs,
+      120_000
+    );
+    assert.equal(
+      evaluateCanary({ canary_command: ["a"], canary_timeout_ms: 1.5 }).timeoutMs,
+      120_000
+    );
+    assert.equal(
+      evaluateCanary({ canary_command: ["a"], canary_timeout_ms: "5000" }).timeoutMs,
+      120_000
+    );
+    // Confirm command echoes through.
+    assert.deepEqual(
+      evaluateCanary({ canary_command: ["a", "b", "c"] }).command,
+      ["a", "b", "c"]
+    );
   });
 });
 
