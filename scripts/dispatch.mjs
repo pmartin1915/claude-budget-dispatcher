@@ -40,6 +40,7 @@ import { checkAndAlert } from "./lib/alerting.mjs";
 import { acquireDispatchLock, releaseDispatchLock } from "./lib/gist.mjs";
 import { materializeConfig } from "./lib/config.mjs";
 import { maybeAutoPush, createDefaultClients } from "./lib/auto-push.mjs";
+import { runPostMergeMonitor } from "./post-merge-monitor.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -125,6 +126,33 @@ async function main() {
 
   // Housekeeping: rotate old log entries (R-5)
   rotateLog();
+
+  // Phase 0: post-merge canary monitor (gate 7).
+  // Reads pending-merges.json from the status gist, replays canary against
+  // any merged commit whose deadline has elapsed (T+15min/1h/4h/24h), and
+  // auto-suspends the project's auto_push flag in local.json on a single
+  // failure. Runs BEFORE gates because:
+  //  - It doesn't need the budget/activity gate (replays are deadline-driven).
+  //  - It doesn't need the dispatch lock (uses its own gist ETag CAS).
+  //  - It must fire on every cron tick regardless of dispatch-skip state.
+  // Fail-soft: never aborts the rest of dispatch.
+  try {
+    const phase0Token = process.env.GIST_AUTH_TOKEN || process.env.GITHUB_TOKEN || "";
+    const phase0Summary = await runPostMergeMonitor({
+      gistId: config.status_gist_id,
+      gistToken: phase0Token,
+      projectsInRotation: config.projects_in_rotation ?? [],
+      ntfyTopic: config.alerting?.topic ?? null,
+      ntfyEnabled: config.alerting?.enabled === true,
+    });
+    if ((phase0Summary.processed ?? 0) > 0 || (phase0Summary.deferred ?? 0) > 0 || (phase0Summary.suspended ?? 0) > 0) {
+      console.log(`[dispatch] phase 0 (gate 7): processed=${phase0Summary.processed} deferred=${phase0Summary.deferred} skipped=${phase0Summary.skipped} suspended=${phase0Summary.suspended}`);
+    }
+  } catch (e) {
+    // Phase 0 must not crash the dispatcher. Log and continue.
+    console.warn(`[dispatch] phase 0 (gate 7) failed: ${e?.message ?? e}`);
+    appendLog({ phase: "post-merge-canary", engine: "dispatch.mjs", outcome: "error", reason: "phase-0-uncaught", error: String(e?.message ?? e).slice(-500) });
+  }
 
   // Phase 1: Gates (0 tokens)
   console.log("[dispatch] phase 1: gates");

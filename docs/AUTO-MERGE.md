@@ -170,6 +170,20 @@ A SINGLE failure within the 24h window causes the dispatcher to:
    - Optionally clean up the completed entry in the gist's `pending-merges.json` (cosmetic).
 3. If the regression is a false positive (flaky canary), still flip `auto_push: true` back manually — and consider hardening the `canary_command` so the noise stops.
 
+### Dispatcher integration (Phase 0)
+
+`scripts/post-merge-monitor.mjs` runs as **Phase 0** of `dispatch.mjs` — before the gates, before the dispatch lock, before any new work selection. It is fail-soft: any uncaught exception is logged and the dispatcher continues with Phase 1 normally. Phase 0 fires on every cron tick the dispatcher runs (typically every 20 min), regardless of whether the budget/activity gate would skip dispatch otherwise — replays are deadline-driven, not budget-driven.
+
+Phase 0 only writes to the gist when something changed (replay processed, deferred, or GC). Idle ticks make zero gist API calls beyond the read.
+
+### Garbage collection
+
+Completed entries (both `replays-clean` and `auto-suspended`) older than 7 days are dropped from `pending-merges.json` on the next gist write. This keeps the file from growing unboundedly. The 7-day window preserves recent history for operator review (~3-4 dispatch cycles after the 24h replay schedule completes).
+
+### Multi-machine
+
+If multiple dispatcher hosts have the same project in their `projects_in_rotation`, **only one wins the replay** for any given entry — the gist ETag CAS ensures the loser sees the entry already-bumped on its next read. Hosts that don't have the project locally return `skipped: project-not-in-local-rotation` and pass the entry through unchanged.
+
 ## Cross-host coordination
 
 - **Overseer (Actions)** writes `pending-merges.json` to the status gist (PATCH with `If-Match` ETag).

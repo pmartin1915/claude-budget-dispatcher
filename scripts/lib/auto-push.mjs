@@ -212,7 +212,7 @@ function _trail(s, max = CANARY_OUTPUT_TAIL_MAX) {
  * @param {string} workingDir - worktree path (cwd for the canary process)
  * @returns {(command: string[], opts: { timeoutMs: number }) => Promise<object>}
  */
-function _defaultCanaryRunner(workingDir) {
+export function _defaultCanaryRunner(workingDir) {
   return function runCanary(command, { timeoutMs }) {
     return new Promise((resolve) => {
       const t0 = Date.now();

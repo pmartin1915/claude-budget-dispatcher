@@ -58,7 +58,7 @@ function asciiSafeHeader(s) {
  * @param {number} [priority=3] - ntfy priority (1=min, 3=default, 5=urgent)
  * @returns {Promise<boolean>} true if sent successfully
  */
-async function sendNtfy(topic, title, body, priority = 3) {
+export async function sendNtfy(topic, title, body, priority = 3) {
   try {
     const res = await fetch(`https://ntfy.sh/${topic}`, {
       method: "POST",

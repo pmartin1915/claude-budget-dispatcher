@@ -178,6 +178,77 @@ export async function acquireDispatchLock(gistId, machine, opts = {}) {
 }
 
 /**
+ * Read a single named file from the status gist with the gist's ETag.
+ * Generic version of readLockWithEtag for non-lock files (e.g. gate-7's
+ * pending-merges.json). Returns:
+ *   { data: parsed-json | null, etag: string | null, status, malformed?: bool }
+ *
+ * Fail-soft: any HTTP error returns `{ data: null, etag: null, status }`.
+ * `malformed: true` is set when the file exists but isn't valid JSON; the
+ * caller can choose to overwrite or fail-soft.
+ *
+ * @param {string} gistId
+ * @param {string} filename - e.g. "pending-merges.json"
+ * @param {{ token?: string }} [opts]
+ */
+export async function readGistFile(gistId, filename, opts = {}) {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": USER_AGENT,
+  };
+  if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
+
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers,
+    signal: AbortSignal.timeout(GIST_TIMEOUT_MS),
+  });
+  if (!resp.ok) return { data: null, etag: null, status: resp.status };
+
+  const etag = resp.headers.get("etag");
+  const gist = await resp.json();
+  const file = gist.files?.[filename];
+  if (!file?.content) return { data: null, etag, status: 200 };
+  try {
+    return { data: JSON.parse(file.content), etag, status: 200 };
+  } catch {
+    return { data: null, etag, status: 200, malformed: true };
+  }
+}
+
+/**
+ * Write (or delete via payload=null) a single named file in the gist with
+ * optional If-Match ETag concurrency control. Generic version of
+ * writeLockWithIfMatch.
+ *
+ * @param {string} gistId
+ * @param {string} filename
+ * @param {object|null} payload
+ * @param {{ token: string, etag?: string|null }} opts
+ * @returns {Promise<{ ok: boolean, status: number }>}
+ */
+export async function writeGistFile(gistId, filename, payload, opts) {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${opts.token}`,
+    "Content-Type": "application/json",
+    "User-Agent": USER_AGENT,
+  };
+  if (opts.etag) headers["If-Match"] = opts.etag;
+
+  const body = payload === null
+    ? { files: { [filename]: null } }
+    : { files: { [filename]: { content: JSON.stringify(payload, null, 2) } } };
+
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(GIST_TIMEOUT_MS),
+  });
+  return { ok: resp.ok, status: resp.status };
+}
+
+/**
  * Release the dispatch lock by deleting the lock.json file entirely.
  * Null payload on GitHub's gist PATCH removes the file cleanly (no ghost
  * "released" state to worry about, per GPT hardening recommendation).
