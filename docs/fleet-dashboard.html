@@ -86,6 +86,43 @@
     word-break: break-word;
   }
 
+  /* Skip-reason chip (yellow tag inline with last-run row when machine is
+     idling for a benign reason — daily-quota-reached, user-active, etc). */
+  .skip-hint {
+    font-size: 10px; color: var(--text-dim); font-style: italic;
+    margin-top: 4px; padding: 4px 8px;
+    border-left: 2px solid var(--yellow);
+    word-break: break-word;
+  }
+
+  /* Burn bar — visual gauge for weekly_pct / dispatches_today usage.
+     Color tier matches the underlying gate semantics: <=80% green,
+     80-100% yellow (approaching the floor), >100% red (over). */
+  /* iOS Safari < 14.5 doesn't support flex `gap`; use margin-right on
+     non-last children instead. Same pattern the rest of this file follows. */
+  .burn-bar-wrap {
+    display: flex; align-items: center;
+    font-size: 11px; padding: 3px 0;
+  }
+  .burn-bar-wrap > *:not(:last-child) { margin-right: 8px; }
+  .burn-bar-wrap .label { color: var(--text-dim); flex-shrink: 0; min-width: 100px; }
+  .burn-bar {
+    flex: 1; height: 6px; background: var(--surface2);
+    border-radius: 3px; overflow: hidden; min-width: 60px;
+  }
+  .burn-bar-fill { height: 100%; transition: width 0.3s ease; }
+  .burn-bar-fill.green { background: var(--green); }
+  .burn-bar-fill.yellow { background: var(--yellow); }
+  .burn-bar-fill.red { background: var(--red); }
+  .burn-pct {
+    font-size: 10px; flex-shrink: 0; min-width: 48px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .burn-pct.green { color: var(--green); }
+  .burn-pct.yellow { color: var(--yellow); }
+  .burn-pct.red { color: var(--red); }
+  .burn-pct.dim { color: var(--text-dim); }
+
   .diag-drawer {
     margin-top: 8px; padding-top: 8px;
     border-top: 1px solid rgba(192,202,245,0.08);
@@ -377,6 +414,132 @@ function errorHint(reason, detail) {
   return null;
 }
 
+// Skip-reason hints — explain WHY the gate blocked dispatch and what (if
+// anything) the operator can do about it. These are benign skips, not
+// errors, so they get a yellow chip rather than a red one. fleet must
+// carry the new estimator fields (weekly_pct, weekly_hours_until_reset,
+// dispatches_today, dispatches_today_max).
+function skipReasonHint(fleet) {
+  const r = fleet?.last_run_reason;
+  if (!present(r)) return null;
+  if (r === 'user-active') {
+    return 'User active in last 20 min. Gate clears 20 min after last keystroke.';
+  }
+  if (r === 'paused') {
+    return 'PAUSED sentinel file present. Operator must remove dev-ops/config/PAUSED to resume.';
+  }
+  if (r === 'daily-quota-reached') {
+    const cap = present(fleet.dispatches_today_max) ? fleet.dispatches_today_max : '?';
+    const used = present(fleet.dispatches_today) ? fleet.dispatches_today : '?';
+    return `Daily quota ${used}/${cap} used. Resets at UTC midnight.`;
+  }
+  if (r === 'weekly-reserve-floor-threatened') {
+    const pct = present(fleet.weekly_pct) ? `${Math.round(fleet.weekly_pct)}%` : '?';
+    const hrs = present(fleet.weekly_hours_until_reset)
+      ? `${Math.round(fleet.weekly_hours_until_reset)}h`
+      : 'next week';
+    return `Weekly burn at ${pct} (target 100%). Gate clears in ${hrs}.`;
+  }
+  if (r === 'trailing30-headroom-below-trigger') {
+    const pct = present(fleet.monthly_pct) ? `${Math.round(fleet.monthly_pct)}%` : '?';
+    return `30-day trailing burn at ${pct}; below the headroom-to-trigger threshold.`;
+  }
+  if (r === 'budget-below-headroom') {
+    return 'Budget gate blocking — see weekly/monthly burn bars below.';
+  }
+  if (r === 'no-eligible-projects') {
+    return 'All rotation projects are dirty, locked, or recently dispatched. Self-resolves.';
+  }
+  if (r === 'estimator-snapshot-parse-error') {
+    return 'usage-estimate.json malformed. Re-run estimator manually to recover.';
+  }
+  if (r === 'insufficient-history-span' || r === 'insufficient-history-for-bootstrap') {
+    return 'Not enough trailing-30 history yet. Cold-start; auto-clears as transcripts accumulate.';
+  }
+  return null;
+}
+
+// Burn bar — visual gauge for percent-of-target metrics (weekly burn,
+// daily quota fill). Returns a DOM fragment. Color tier matches the gate
+// semantics: <=80% green, 80-100% yellow, >100% red.
+function buildBurnBar(label, pct, opts = {}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'burn-bar-wrap';
+  const lbl = document.createElement('span');
+  lbl.className = 'label';
+  lbl.textContent = label;
+  wrap.appendChild(lbl);
+
+  const bar = document.createElement('div');
+  bar.className = 'burn-bar';
+  const fill = document.createElement('div');
+  fill.className = 'burn-bar-fill';
+  // Cap visual width at 100% but let the numeric label show the true value.
+  // Negative values (rare; e.g. headroom_pct) clamp to 0.
+  const clamped = Math.max(0, Math.min(100, Number(pct)));
+  fill.style.width = `${clamped}%`;
+  let tier;
+  if (pct > 100) tier = 'red';
+  else if (pct >= (opts.warnAt ?? 80)) tier = 'yellow';
+  else tier = 'green';
+  fill.classList.add(tier);
+  bar.appendChild(fill);
+  wrap.appendChild(bar);
+
+  const pctLabel = document.createElement('span');
+  pctLabel.className = `burn-pct ${tier}`;
+  // Display with one decimal for sub-100 values so 72.9% doesn't read as 73%.
+  // Above 100% drop the decimal — "144%" is more legible than "143.97%".
+  pctLabel.textContent = pct >= 100 ? `${Math.round(pct)}%` : `${Number(pct).toFixed(1)}%`;
+  wrap.appendChild(pctLabel);
+  return wrap;
+}
+
+// Daily-quota counter as a non-bar row (text-only; the cap can be 30+ so a
+// 0-100 bar misrepresents the scale).
+function buildQuotaRow(used, cap) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const lbl = document.createElement('span');
+  lbl.className = 'label';
+  lbl.textContent = 'Daily quota';
+  const val = document.createElement('span');
+  val.className = 'value';
+  if (present(cap) && cap > 0) {
+    const ratio = used / cap;
+    val.textContent = `${used}/${cap}`;
+    if (ratio >= 1) val.classList.add('warn');
+    else val.classList.add('accent');
+  } else {
+    val.textContent = String(used);
+    val.classList.add('accent');
+  }
+  row.appendChild(lbl);
+  row.appendChild(val);
+  return row;
+}
+
+// Fleet-aggregate "last successful dispatch" — handles per-host health.json
+// underreporting (last writer wins on the gist when multiple hosts compute
+// from their own logs).
+//
+// MIRRORS scripts/lib/fleet.mjs:aggregateLastDispatch — keep in sync. The
+// dashboard ships as static HTML to GitHub Pages with no build step, so the
+// helper is duplicated rather than imported. Any logic change must land in
+// both files. fleet.test.mjs covers the mjs side; manual smoke against the
+// live gist covers the dashboard side.
+function aggregateLastDispatch(fleetSnaps) {
+  let bestTs = null, bestMachine = null, bestMs = -Infinity;
+  for (const snap of fleetSnaps || []) {
+    const ts = snap?.last_dispatch_ts;
+    if (typeof ts !== 'string') continue;
+    const ms = new Date(ts).getTime();
+    if (!Number.isFinite(ms)) continue;
+    if (ms > bestMs) { bestMs = ms; bestTs = ts; bestMachine = snap?.machine ?? null; }
+  }
+  return { ts: bestTs, machine: bestMachine };
+}
+
 // === Machine state + tags ===
 
 function machineState(fleet) {
@@ -572,6 +735,20 @@ function buildPmEntry(entry, kind) {
 function render(gist) {
   const health = parseFile(gist, 'health.json');
   const fleetFiles = Object.keys(gist.files || {}).filter(f => f.startsWith('fleet-') && f.endsWith('.json'));
+  // Pre-parse fleet snapshots once — used for both fleet-aggregate computation
+  // (health banner) and individual machine cards. Each file is at most a
+  // small JSON object; the cost of double-parsing was negligible but the
+  // intermediate is also handy for the aggregate.
+  const fleetSnaps = fleetFiles.map((f) => {
+    const snap = parseFile(gist, f);
+    snap.__file = f;
+    return snap;
+  });
+
+  // Fleet-aggregate "last successful dispatch" — corrects under-reporting
+  // when health.json is written by a host whose log is older than another
+  // host's recent success (last writer wins on the gist).
+  const fleetAgg = aggregateLastDispatch(fleetSnaps);
 
   // Health banner
   const hState = health.state || 'idle';
@@ -601,7 +778,15 @@ function render(gist) {
     const hours = Number(health.hours_since_success);
     const h = Math.floor(hours);
     const m = Math.floor((hours - h) * 60);
-    counts.push(`last success: ${h}h ${m}m ago`);
+    counts.push(`host last success: ${h}h ${m}m ago`);
+  }
+  // Fleet-aggregate row — only emit when it differs meaningfully from the
+  // host-only number (same host or fleet has no history -> skip the noise).
+  if (fleetAgg.ts) {
+    const fleetMs = Date.now() - new Date(fleetAgg.ts).getTime();
+    if (Number.isFinite(fleetMs) && fleetMs >= 0) {
+      counts.push(`fleet last success: ${formatDuration(fleetMs)} (${fleetAgg.machine ?? '?'})`);
+    }
   }
   if (counts.length > 0) {
     const cline = document.createElement('div');
@@ -619,8 +804,8 @@ function render(gist) {
   const machinesEl = document.getElementById('machines');
   machinesEl.innerHTML = '';
 
-  for (const f of fleetFiles) {
-    const fleet = parseFile(gist, f);
+  for (const fleet of fleetSnaps) {
+    const f = fleet.__file;
     const name = fleet.machine || f.replace(/^fleet-/, '').replace(/\.json$/, '');
     const state = machineState(fleet);
 
@@ -631,6 +816,13 @@ function render(gist) {
       <div class="card-title"><div class="machine-dot ${state}"></div>${esc(name)}</div>
       <div class="row"><span class="label">Last run</span><span class="value">${esc(ago(fleet.last_run_ts))}</span></div>
       <div class="row"><span class="label">Outcome</span><span class="value">${outcomeTag(fleet.last_run_outcome)}</span></div>`;
+
+    // Skip-reason chip — when last_run was a skip and we have a reason, show
+    // it inline. Helps distinguish "alive but gating" from "dead": the bot
+    // is correctly idle because of weekly-reserve-floor, daily-quota, etc.
+    if (fleet.last_run_outcome === 'skipped' && present(fleet.last_run_reason)) {
+      rows += `<div class="row"><span class="label">Skip reason</span><span class="value warn">${esc(fleet.last_run_reason)}</span></div>`;
+    }
 
     if (present(fleet.last_project)) {
       rows += `<div class="row"><span class="label">Project</span><span class="value accent">${esc(fleet.last_project)}</span></div>`;
@@ -649,7 +841,57 @@ function render(gist) {
       rows += `<div class="row"><span class="label">Error</span><span class="value error">${esc(fleet.last_error_reason)}</span></div>`;
     }
 
+    // Stale row — explicit text companion to the gray dot, so iPhone glances
+    // get the "this machine hasn't checked in" signal without needing color.
+    if (state === 'stale' && present(fleet.last_run_ts)) {
+      rows += `<div class="row"><span class="label">Stale</span><span class="value warn">no heartbeat in ${esc(ago(fleet.last_run_ts))}</span></div>`;
+    }
+
     card.innerHTML = rows;
+
+    // Skip-reason hint (under the Skip row, before Error). Yellow-bordered
+    // companion to errorHint, but for benign idling explanations.
+    const sHint = skipReasonHint(fleet);
+    if (sHint && fleet.last_run_outcome === 'skipped') {
+      const sDiv = document.createElement('div');
+      sDiv.className = 'skip-hint';
+      sDiv.textContent = sHint;
+      card.appendChild(sDiv);
+    }
+
+    // Daily-quota counter — append after rows, before burn bars. Only when
+    // we actually have a count (new field; gracefully absent on old gist
+    // files until each machine's wrapper next runs the new fleet.mjs).
+    if (present(fleet.dispatches_today)) {
+      card.appendChild(buildQuotaRow(Number(fleet.dispatches_today), fleet.dispatches_today_max));
+    }
+
+    // Burn bars — weekly first (the floor that gates dispatch), then 30-day
+    // (context for whether the weekly-floor is biting because of a tight
+    // month or just an exam-prep week). Estimator may be absent; gate
+    // gracefully on null.
+    if (present(fleet.weekly_pct) && Number.isFinite(Number(fleet.weekly_pct))) {
+      card.appendChild(buildBurnBar('Weekly burn', Number(fleet.weekly_pct)));
+    }
+    if (present(fleet.monthly_pct) && Number.isFinite(Number(fleet.monthly_pct))) {
+      card.appendChild(buildBurnBar('30-day burn', Number(fleet.monthly_pct)));
+    }
+    // Reset countdown — when the weekly gate is blocking and we know when
+    // the window rolls forward, surface the wait. UTC-anchored so the
+    // number matches the gate's own clock.
+    if (fleet.weekly_gate_passes === false && present(fleet.weekly_hours_until_reset)) {
+      const resetRow = document.createElement('div');
+      resetRow.className = 'row';
+      const lbl = document.createElement('span');
+      lbl.className = 'label';
+      lbl.textContent = 'Weekly resets in';
+      const val = document.createElement('span');
+      val.className = 'value warn';
+      val.textContent = `${Math.round(Number(fleet.weekly_hours_until_reset))}h`;
+      resetRow.appendChild(lbl);
+      resetRow.appendChild(val);
+      card.appendChild(resetRow);
+    }
 
     // Phase-specific hint (under the Error row), DOM-built for safety
     const hint = errorHint(fleet.last_error_reason, fleet.last_error_detail);

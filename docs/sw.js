@@ -1,7 +1,7 @@
 // Service Worker for Dispatcher Fleet PWA
 // Caches the dashboard shell for offline use, always fetches fresh gist data.
 
-const CACHE_NAME = 'fleet-v2';
+const CACHE_NAME = 'fleet-v3';
 const SHELL_FILES = [
   './fleet-dashboard.html',
   './icon.svg',
