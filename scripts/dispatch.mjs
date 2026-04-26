@@ -137,6 +137,15 @@ async function main() {
   //  - It must fire on every cron tick regardless of dispatch-skip state.
   // Fail-soft: never aborts the rest of dispatch.
   try {
+    // Gist-auth fallback chain (host-aware). On a dispatcher host the operator
+    // typically has GITHUB_TOKEN set with full PAT scope (used by gh CLI for
+    // pushes, the dispatch lock, etc.), so falling back to it is safe when
+    // GIST_AUTH_TOKEN isn't separately provisioned. The Overseer (Actions)
+    // uses a different fallback (OVERSEER_GH_TOKEN) because the auto-
+    // provisioned GITHUB_TOKEN there does NOT include `gist` scope. Keeping
+    // both fallbacks distinct means each host uses the most-likely-scoped
+    // token in its environment without forcing operators to provision a
+    // separate GIST_AUTH_TOKEN secret on every host. PAL focus 4 / 2026-04-28.
     const phase0Token = process.env.GIST_AUTH_TOKEN || process.env.GITHUB_TOKEN || "";
     const phase0Summary = await runPostMergeMonitor({
       gistId: config.status_gist_id,

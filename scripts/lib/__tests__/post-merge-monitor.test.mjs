@@ -26,10 +26,12 @@ const DEFAULT_SCHEDULE = [FIFTEEN_MIN, ONE_HOUR, FOUR_HOURS, ONE_DAY];
 // In-memory mock fs for mutateLocalJsonAtomic
 // ---------------------------------------------------------------------------
 
-function mockFs(initial = {}) {
+function mockFs(initial = {}, opts = {}) {
   const files = new Map(Object.entries(initial));
+  const calls = { rmSync: [] };
   return {
     files,
+    calls,
     existsSync: (p) => files.has(p),
     readFileSync: (p) => {
       if (!files.has(p)) throw new Error(`ENOENT: ${p}`);
@@ -37,10 +39,12 @@ function mockFs(initial = {}) {
     },
     writeFileSync: (p, data) => { files.set(p, data); },
     renameSync: (from, to) => {
+      if (opts.renameThrows) throw opts.renameThrows;
       if (!files.has(from)) throw new Error(`ENOENT: ${from}`);
       files.set(to, files.get(from));
       files.delete(from);
     },
+    rmSync: (p) => { calls.rmSync.push(p); files.delete(p); },
   };
 }
 
@@ -189,6 +193,31 @@ describe("mutateLocalJsonAtomic()", () => {
     assert.match(r.reason, /^parse-failed:/);
     // Original content preserved.
     assert.equal(fs.files.get("/local.json"), "not json {{{");
+  });
+
+  it("cleans up orphan tmp file on rename failure", () => {
+    const fs = mockFs(
+      {
+        "/local.json": JSON.stringify({
+          projects_in_rotation: [{ slug: "a", auto_push: true }],
+        }),
+      },
+      { renameThrows: new Error("EPERM: rename failed") },
+    );
+    const r = mutateLocalJsonAtomic({
+      localJsonPath: "/local.json", projectSlug: "a", autoPushTarget: false, fs,
+    });
+    assert.equal(r.changed, false);
+    assert.match(r.reason, /^write-rename-failed:/);
+    // Cleanup must have been called against the tmp path.
+    assert.equal(fs.calls.rmSync.length, 1);
+    assert.match(fs.calls.rmSync[0], /^\/local\.json\.tmp\./);
+    // No leftover tmp in the in-memory fs.
+    const leftovers = [...fs.files.keys()].filter((k) => k.startsWith("/local.json.tmp"));
+    assert.equal(leftovers.length, 0);
+    // Original local.json untouched.
+    const original = JSON.parse(fs.files.get("/local.json"));
+    assert.equal(original.projects_in_rotation[0].auto_push, true);
   });
 });
 

@@ -1449,6 +1449,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const geminiApiKey = process.env.GEMINI_API_KEY || "";
   const mistralApiKey = process.env.MISTRAL_API_KEY || "";
   const gistId = process.env.STATUS_GIST_ID || "";
+  // Gist-auth fallback (host-aware). On Actions runners the auto-provisioned
+  // GITHUB_TOKEN does NOT carry `gist` scope, so we fall back to
+  // OVERSEER_GH_TOKEN (the same PAT used for the PR labeling/merging API
+  // calls) which is operator-provisioned with the necessary scopes. The
+  // dispatcher-host equivalent in dispatch.mjs Phase 0 falls back to
+  // GITHUB_TOKEN instead because operator hosts typically have it set with
+  // a full-scope PAT. Each host uses the most-likely-scoped token already
+  // in its environment. PAL focus 4 / 2026-04-28.
   const gistToken = process.env.GIST_AUTH_TOKEN || ghToken;
   const topLevelAutoMerge = (process.env.OVERSEER_AUTO_MERGE ?? "").toLowerCase() === "true";
   const coolingOffMinutes = Number.parseFloat(process.env.OVERSEER_COOLING_OFF_MINUTES ?? "") || undefined;

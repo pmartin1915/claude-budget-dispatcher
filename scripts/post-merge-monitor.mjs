@@ -131,7 +131,7 @@ export function evaluateCanaryResult(result) {
  * @returns {{ changed: boolean, alreadySuspended?: boolean, reason?: string }}
  */
 export function mutateLocalJsonAtomic({ localJsonPath, projectSlug, autoPushTarget, fs = null }) {
-  const realFs = fs ?? { readFileSync, writeFileSync, renameSync, existsSync };
+  const realFs = fs ?? { readFileSync, writeFileSync, renameSync, existsSync, rmSync };
   if (!realFs.existsSync(localJsonPath)) {
     return { changed: false, reason: `local-json-missing:${localJsonPath}` };
   }
@@ -170,10 +170,11 @@ export function mutateLocalJsonAtomic({ localJsonPath, projectSlug, autoPushTarg
     realFs.renameSync(tmpPath, localJsonPath);
     return { changed: true };
   } catch (e) {
-    // Best-effort cleanup of orphan tmp on failed rename. In production we
-    // use the imported rmSync; in tests with an injected mock fs that lacks
-    // rmSync we just leave the tmp file (test fs is in-memory and discarded).
-    try { if (realFs.existsSync(tmpPath)) rmSync(tmpPath); } catch { /* ignore */ }
+    // Best-effort cleanup of orphan tmp on failed rename. realFs.rmSync is
+    // pulled from the injectable fs (default is node:fs imported at top);
+    // tests can supply a mock that records the cleanup call to assert the
+    // tmp doesn't leak.
+    try { if (realFs.existsSync(tmpPath)) realFs.rmSync(tmpPath); } catch { /* ignore */ }
     return { changed: false, reason: `write-rename-failed:${_trail(e?.message ?? e)}` };
   }
 }
