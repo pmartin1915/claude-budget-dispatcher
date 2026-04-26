@@ -54,8 +54,8 @@
       "resets_on_day_of_week": 4,
       "resets_at_hour_utc": 19,
       "ramp_steps": [
-        { "hours_before_reset": 48, "reserve_floor_pct": 10, "max_runs_per_day": 10, "max_pct_per_run": 1.5 },
-        { "hours_before_reset": 24, "reserve_floor_pct": 5,  "max_runs_per_day": 12, "max_pct_per_run": 2.0 }
+        { "hours_before_reset": 48, "reserve_floor_pct": 10, "max_runs_per_day": 24, "max_pct_per_run": 1.5 },
+        { "hours_before_reset": 24, "reserve_floor_pct": 5,  "max_runs_per_day": 36, "max_pct_per_run": 2.0 }
       ],
       "hard_minimum_reserve_pct": 5,
       "interactive_reserve_hours": 4
@@ -63,7 +63,8 @@
   },
 
   "max_opportunistic_pct_per_run": 1.0,
-  "max_runs_per_day": 30,
+  "_max_runs_per_day_rationale": "Per-machine daily cap, primarily a runaway/circuit-breaker for the Node engine (which uses free-tier Gemini/Mistral, not Claude Max). Real binding constraint is per-key Gemini Pro RPD (~50/day free tier) — when that's exhausted, the C2 fallback chain (DECISIONS.md 2026-04-14, commit af1071f) routes selector calls to Flash and Mistral, so dispatches still complete. The dashboard surfaces selector_fallback_count + degraded state when fallback rate climbs. 96 = one per 15 min if every cycle could fire — effectively uncapped during normal operation while still bounded enough to catch a runaway loop.",
+  "max_runs_per_day": 96,
 
   "activity_gate": {
     "idle_minutes_required": 20,
