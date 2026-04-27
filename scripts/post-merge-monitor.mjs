@@ -30,6 +30,7 @@ import { _defaultCanaryRunner } from "./lib/auto-push.mjs";
 import { appendLog } from "./lib/log.mjs";
 import { sendNtfy } from "./lib/alerting.mjs";
 import { recordPipelineMerges } from "./lib/pipelines.mjs";
+import { materializeConfig } from "./lib/config.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -553,12 +554,28 @@ export async function runPostMergeMonitor(args) {
 // ---------------------------------------------------------------------------
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // Bug F-adjacent (2026-04-27): manual `node scripts/post-merge-monitor.mjs`
+  // invocations missed per-machine local.json overrides (e.g. canary_command)
+  // because materialization only ran inside the dispatcher cron path. Run it
+  // here so the CLI is hermetic for smoke-testing.
+  try {
+    materializeConfig();
+  } catch (e) {
+    console.error(`[post-merge-monitor] materializeConfig failed: ${e?.message ?? e}`);
+    // Continue: budget.json may already be hand-written or up-to-date.
+  }
   const cfgPath = resolve(REPO_ROOT, "config", "budget.json");
   if (!existsSync(cfgPath)) {
     console.error("[post-merge-monitor] config/budget.json missing");
     process.exit(0);
   }
-  const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  } catch (e) {
+    console.error(`[post-merge-monitor] config/budget.json parse error: ${e?.message ?? e}`);
+    process.exit(0);  // Honor never-crash CLI contract.
+  }
   const gistId = cfg.status_gist_id ?? "";
   const gistToken = process.env.GIST_AUTH_TOKEN || process.env.GITHUB_TOKEN || "";
   const ntfyEnabled = cfg.alerting?.enabled === true;

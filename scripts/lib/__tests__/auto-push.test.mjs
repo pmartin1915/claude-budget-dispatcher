@@ -9,6 +9,7 @@ import {
   matchGlob,
   evaluatePathFirewall,
   evaluateCanary,
+  getCanarySpawnOptions,
   maybeAutoPush,
   FALLBACK_PROTECTED_GLOBS,
 } from "../auto-push.mjs";
@@ -559,6 +560,64 @@ describe("evaluateCanary()", () => {
     assert.deepEqual(
       evaluateCanary({ canary_command: ["a", "b", "c"] }).command,
       ["a", "b", "c"]
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCanarySpawnOptions() -- Bug F: shell:true for .cmd/.bat on Windows
+// ---------------------------------------------------------------------------
+
+describe("getCanarySpawnOptions()", () => {
+  it("Windows .cmd flips shell:true and keeps detached:false", () => {
+    assert.deepEqual(
+      getCanarySpawnOptions(["npm.cmd", "test"], "win32"),
+      { shell: true, detached: false }
+    );
+  });
+
+  it("Windows .bat flips shell:true and keeps detached:false", () => {
+    assert.deepEqual(
+      getCanarySpawnOptions(["foo.bat", "arg"], "win32"),
+      { shell: true, detached: false }
+    );
+  });
+
+  it("Windows non-cmd keeps shell:false; detached:false (Windows uses taskkill /T /F)", () => {
+    assert.deepEqual(
+      getCanarySpawnOptions(["node", "script.js"], "win32"),
+      { shell: false, detached: false }
+    );
+  });
+
+  it("POSIX always keeps shell:false and detached:true (process-group kill semantics)", () => {
+    // Even with .cmd in the command (silly but possible), POSIX never flips shell.
+    assert.deepEqual(
+      getCanarySpawnOptions(["npm.cmd", "test"], "linux"),
+      { shell: false, detached: true }
+    );
+    assert.deepEqual(
+      getCanarySpawnOptions(["npm", "test"], "linux"),
+      { shell: false, detached: true }
+    );
+    assert.deepEqual(
+      getCanarySpawnOptions(["npm", "test"], "darwin"),
+      { shell: false, detached: true }
+    );
+  });
+
+  it("extension match is case-insensitive on Windows (.CMD, .BAT, .Cmd all flip shell:true)", () => {
+    assert.deepEqual(
+      getCanarySpawnOptions(["NPM.CMD", "test"], "win32"),
+      { shell: true, detached: false }
+    );
+    assert.deepEqual(
+      getCanarySpawnOptions(["foo.BAT"], "win32"),
+      { shell: true, detached: false }
+    );
+    assert.deepEqual(
+      getCanarySpawnOptions(["bar.Cmd"], "win32"),
+      { shell: true, detached: false }
     );
   });
 });

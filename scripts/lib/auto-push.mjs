@@ -188,6 +188,39 @@ export function evaluateCanary(projectConfig) {
   return { command, timeoutMs };
 }
 
+/**
+ * Decide spawn options for the canary subprocess.
+ *
+ * Bug F (2026-04-27): Node `spawn(...,{shell:false})` cannot directly invoke
+ * `.cmd`/`.bat` files on Windows; throws EINVAL. Operators write the natural
+ * `["npm.cmd","test"]` form in local.json, so we selectively enable
+ * `shell:true` for those extensions on Windows. Three-layer defense keeps the
+ * surface safe even with shell:true:
+ *   1. AJV schema enforces canary_command is a string array, minItems:1.
+ *   2. evaluateCanary() runtime-rejects non-string / empty entries.
+ *   3. spawn() with array form passes argv as a list to the shell, NOT
+ *      interpolated into a single shell command line. Even with shell:true,
+ *      arguments are not shell-evaluated.
+ *
+ * detached:true is the POSIX pattern that puts the child in its own process
+ * group so `process.kill(-pid, "SIGKILL")` reaches the whole tree. Windows
+ * uses taskkill /T /F for tree-kill (doesn't need a process group), so
+ * detached stays false on Windows regardless of shell.
+ *
+ * @param {string[]} command  validated by evaluateCanary upstream
+ * @param {string}   platform process.platform (injected for testability)
+ * @returns {{ shell: boolean, detached: boolean }}
+ */
+export function getCanarySpawnOptions(command, platform) {
+  const isWindows = platform === "win32";
+  const exe = String(command[0]).toLowerCase();
+  const isCmdShim = isWindows && (exe.endsWith(".cmd") || exe.endsWith(".bat"));
+  return {
+    shell: isCmdShim,
+    detached: !isWindows,
+  };
+}
+
 // Trail-limit a string to its last `max` chars. Tail-preserving because canary
 // failures typically print the actual error at the end of stdout/stderr.
 function _trail(s, max = CANARY_OUTPUT_TAIL_MAX) {
@@ -199,8 +232,11 @@ function _trail(s, max = CANARY_OUTPUT_TAIL_MAX) {
 /**
  * Default canary runner. Process-tree-safe per DECISIONS.md 2026-04-14 R-2:
  * spawn + setTimeout + taskkill /T /F (Windows) or process.kill(-pid, SIGKILL)
- * (POSIX). shell:false is the config-injection guard -- canary_command is an
- * array enforced by schema, so no shell expansion ever runs.
+ * (POSIX). The config-injection guard is the array-form spawn (each command[i]
+ * becomes a discrete argv slot, never a shell-interpolated string), backed by
+ * schema + evaluateCanary runtime checks. Bug F (2026-04-27): shell is now
+ * selectively true for `.cmd`/`.bat` on Windows -- safe under the array-form
+ * guarantee. See getCanarySpawnOptions for the full three-layer rationale.
  *
  * Return shape: { exitCode, stdout, stderr, timedOut, durationMs, spawnError }
  *   - exitCode: number on clean exit, null on timeout or spawn-error
@@ -228,16 +264,16 @@ export function _defaultCanaryRunner(workingDir) {
 
       let child;
       try {
-        // shell:false: argv array form, no shell expansion (config-injection guard).
-        // Schema enforces minItems:1 so command[0] is always present.
+        // Bug F: getCanarySpawnOptions() returns shell:true ONLY for
+        // `.cmd`/`.bat` on Windows (Node spawn cannot exec those without a
+        // shell). Three-layer defense keeps shell:true safe -- see helper
+        // JSDoc above. Schema enforces minItems:1 so command[0] is present.
+        const { shell, detached } = getCanarySpawnOptions(command, process.platform);
         child = spawn(command[0], command.slice(1), {
           cwd: workingDir,
           stdio: ["ignore", "pipe", "pipe"],
-          shell: false,
-          // POSIX: detached:true puts the child in its own process group so
-          // process.kill(-pid, "SIGKILL") below kills the whole tree. Windows
-          // ignores this; tree-kill there uses taskkill /T /F.
-          detached: process.platform !== "win32",
+          shell,
+          detached,
         });
       } catch (e) {
         safeResolve({
