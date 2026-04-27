@@ -67,7 +67,10 @@ describe("acquireDispatchLock (ETag edition)", () => {
     assert.equal(result.acquired, true);
     assert.ok(result.lockId);
     assert.equal(result.fencingToken, 1);
-    assert.equal(writer.state.receivedEtags[0], "etag-init");
+    // Bug E (2026-04-27): GitHub gists API rejects If-Match on PATCH with
+    // 400. acquireDispatchLock no longer forwards the etag to the writer;
+    // concurrency lives in the re-read confirmation below.
+    assert.equal(writer.state.receivedEtags[0], null);
   });
 
   it("acquires lock when existing lock is expired (past expiresAt)", async () => {
@@ -123,7 +126,12 @@ describe("acquireDispatchLock (ETag edition)", () => {
     assert.equal(writer.state.callCount, 0, "should not attempt write when lock is held");
   });
 
-  it("rejects with 'lost ETag race' when PATCH returns 412", async () => {
+  it("degrades fail-open when PATCH returns 412 (post-Bug-E unreachable in prod, kept for behavior coverage)", async () => {
+    // Bug E (2026-04-27): GitHub gists API rejects If-Match on PATCH with
+    // 400, so 412 is no longer reachable from production code. If the
+    // writer somehow returns 412 anyway (e.g., a future GitHub change),
+    // the post-Bug-E behavior is fail-open (degraded), same as any other
+    // non-2xx — there's no special "lost ETag race" branch anymore.
     const writer = mockWriter({ ok: false, status: 412 });
     const read = async () => ({ data: null, etag: "etag-init", status: 200 });
 
@@ -134,11 +142,12 @@ describe("acquireDispatchLock (ETag edition)", () => {
       _writeFn: writer,
     });
 
-    assert.equal(result.acquired, false);
-    assert.match(result.reason, /lost ETag race/);
+    assert.equal(result.acquired, true, "fail-open on any non-2xx write status");
+    assert.equal(result.degraded, true);
+    assert.equal(result.lockId, null);
   });
 
-  it("rejects when re-read shows a different lockId (silent ETag non-enforcement)", async () => {
+  it("rejects when re-read shows a different lockId (post-Bug-E sole concurrency primitive)", async () => {
     // Simulates GitHub accepting our write but another machine's write also
     // landed during the same window. Our defense-in-depth re-read catches it.
     const writer = mockWriter({ ok: true, status: 200 });

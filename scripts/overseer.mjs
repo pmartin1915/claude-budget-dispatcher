@@ -525,11 +525,15 @@ export function createDefaultGitHubClient(token) {
 // scripts/lib/gist.mjs). Used by gate 6 to write a pending-merge entry to the
 // status gist's `pending-merges.json` file. Tests inject a mock.
 //
-// PATCH /gists/<id> with `If-Match: <etag>` is the existing concurrency model
-// (mirrors gist.mjs:writeLockWithIfMatch). On 412 Precondition Failed we
-// re-read the gist once and retry the merge. Beyond that we fail-soft: the
-// merge already happened on GitHub; gate 7 won't fire for this PR but the
-// merge is logged in JSONL so the operator can re-add the entry by hand.
+// Concurrency model: PATCH /gists/<id> without conditional headers (Bug E,
+// 2026-04-27 — GitHub gists API rejects If-Match on PATCH with 400). Per-
+// entry idempotency is enforced by (repo, pr_number, merge_commit_sha)
+// tuple at writePendingMergeEntry, so two writers landing the same entry
+// near-simultaneously deduplicate. Two writers landing different entries
+// in the same gist version race window may drop one (last-write-wins);
+// the merge already happened on GitHub and is logged in JSONL, so the
+// operator can re-add the entry by hand if it matters. With overseer cron
+// at */2h cadence, this race window is negligible.
 // ---------------------------------------------------------------------------
 
 class GistError extends Error {
@@ -575,12 +579,13 @@ export function createDefaultGistClient(gistId, token) {
       }
     },
     async writePendingMerges(payload, etag) {
-      // PATCH the single file. If-Match guards against concurrent writers.
+      // PATCH the single file. No conditional headers per Bug E (GitHub
+      // gists API rejects If-Match on PATCH with 400). `etag` is accepted
+      // but ignored, retained for callsite stability with writePendingMergeEntry.
       // Returns { ok, status }.
       if (!gistId) return { ok: false, status: 0, reason: "no-gist-id" };
       const url = `https://api.github.com/gists/${encodeURIComponent(gistId)}`;
       const headers = { "Content-Type": "application/json" };
-      if (etag) headers["If-Match"] = etag;
       const body = {
         files: { [PENDING_MERGES_GIST_FILE]: { content: JSON.stringify(payload, null, 2) } },
       };
@@ -1327,59 +1332,56 @@ async function runAutoMergeProgression({
 }
 
 /**
- * Append a single pending-merge entry to the gist file. Read-modify-write
- * with ETag CAS. On 412 (concurrent write) we re-read once and retry. Beyond
- * one retry, fail-soft (the merge already happened on GitHub).
+ * Append a single pending-merge entry to the gist file. Read-modify-write.
+ * Concurrency: per-entry idempotency by (repo, pr_number, merge_commit_sha)
+ * tuple deduplicates concurrent writers landing the same entry. Concurrent
+ * writers landing different entries in the same gist version race window
+ * may drop one (last-write-wins per Bug E — GitHub gists API does not
+ * support conditional PATCH headers). With overseer cron at the standard
+ * 2h cadence the race window is negligible; the merge already happened on
+ * GitHub either way.
  */
 export async function writePendingMergeEntry({ gistClient, entry }) {
-  const attempt = async () => {
-    let read;
-    try {
-      read = await gistClient.readPendingMerges();
-    } catch (e) {
-      return { ok: false, status: e?.status ?? 0, reason: `gist-read-failed`, error: _trail(e?.message ?? e) };
-    }
-    if (read?.degraded) return { ok: false, status: 0, reason: read.reason ?? "gist-degraded" };
-    const existing = read?.data && typeof read.data === "object" ? read.data : { schema_version: PENDING_MERGES_SCHEMA_VERSION, entries: [] };
-    // PAL HIGH-1 (cross-host coordination): refuse to write if a future
-    // version of the Overseer has already written a higher schema_version.
-    // Without this guard, a v1 writer would clobber the v2 file and silently
-    // strip any new fields. Fail-soft: log + return ok:false. The merge
-    // already happened on GitHub; gate 7 won't run for this PR (a future-
-    // version dispatcher will reconcile).
-    const existingVer = Number.isFinite(existing.schema_version) ? existing.schema_version : PENDING_MERGES_SCHEMA_VERSION;
-    if (existingVer > PENDING_MERGES_SCHEMA_VERSION) {
-      return {
-        ok: false,
-        status: 0,
-        reason: `gist-schema-version-newer:remote=${existingVer}-local=${PENDING_MERGES_SCHEMA_VERSION}`,
-      };
-    }
-    const entries = Array.isArray(existing.entries) ? existing.entries.slice() : [];
-    // Idempotency: if an entry already exists for (repo, pr_number) with the
-    // same merge_commit_sha, do not duplicate.
-    const dup = entries.find((e) =>
-      e?.repo === entry.repo &&
-      e?.pr_number === entry.pr_number &&
-      (e?.merge_commit_sha ?? null) === (entry.merge_commit_sha ?? null)
-    );
-    if (dup) return { ok: true, status: 200, note: "already-present" };
-    entries.push(entry);
-    const payload = {
-      schema_version: PENDING_MERGES_SCHEMA_VERSION,
-      entries,
-      updated_at_ms: Date.now(),
-    };
-    return gistClient.writePendingMerges(payload, read?.etag ?? null);
-  };
-  const first = await attempt();
-  if (first.ok) return first;
-  if (first.status === 412) {
-    // Concurrent write: re-read, retry once.
-    const second = await attempt();
-    return second.ok ? second : { ...second, retried: true };
+  let read;
+  try {
+    read = await gistClient.readPendingMerges();
+  } catch (e) {
+    return { ok: false, status: e?.status ?? 0, reason: `gist-read-failed`, error: _trail(e?.message ?? e) };
   }
-  return first;
+  if (read?.degraded) return { ok: false, status: 0, reason: read.reason ?? "gist-degraded" };
+  const existing = read?.data && typeof read.data === "object" ? read.data : { schema_version: PENDING_MERGES_SCHEMA_VERSION, entries: [] };
+  // PAL HIGH-1 (cross-host coordination): refuse to write if a future
+  // version of the Overseer has already written a higher schema_version.
+  // Without this guard, a v1 writer would clobber the v2 file and silently
+  // strip any new fields. Fail-soft: log + return ok:false. The merge
+  // already happened on GitHub; gate 7 won't run for this PR (a future-
+  // version dispatcher will reconcile).
+  const existingVer = Number.isFinite(existing.schema_version) ? existing.schema_version : PENDING_MERGES_SCHEMA_VERSION;
+  if (existingVer > PENDING_MERGES_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      status: 0,
+      reason: `gist-schema-version-newer:remote=${existingVer}-local=${PENDING_MERGES_SCHEMA_VERSION}`,
+    };
+  }
+  const entries = Array.isArray(existing.entries) ? existing.entries.slice() : [];
+  // Idempotency: if an entry already exists for (repo, pr_number) with the
+  // same merge_commit_sha, do not duplicate.
+  const dup = entries.find((e) =>
+    e?.repo === entry.repo &&
+    e?.pr_number === entry.pr_number &&
+    (e?.merge_commit_sha ?? null) === (entry.merge_commit_sha ?? null)
+  );
+  if (dup) return { ok: true, status: 200, note: "already-present" };
+  entries.push(entry);
+  const payload = {
+    schema_version: PENDING_MERGES_SCHEMA_VERSION,
+    entries,
+    updated_at_ms: Date.now(),
+  };
+  // `etag` arg retained for backwards compatibility with the gist client
+  // signature; ignored downstream per Bug E.
+  return gistClient.writePendingMerges(payload, read?.etag ?? null);
 }
 
 /**

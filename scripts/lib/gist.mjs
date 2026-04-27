@@ -1,16 +1,19 @@
-// gist.mjs — Distributed dispatch lock via GitHub Gist + ETag optimistic locking.
+// gist.mjs — Distributed dispatch lock via GitHub Gist + read-confirmation.
 //
-// Phase A hardening (2026-04-24, per docs/research/HARDENING-synthesis-gemini-
-// 2026-04-24.md §4). Prior implementation used a read -> write -> wait -> re-read
-// pattern with a 1s settle window; both machines could write inside the window
-// and the "loser" detection had visible races.
+// Phase A hardening (2026-04-24) originally relied on PATCH `If-Match: <etag>`
+// for atomic acquisition. Bug E (surfaced 2026-04-27 by gate-7 smoke against
+// canary PR #45) revealed that GitHub's gists API does NOT support conditional
+// request headers on PATCH — they're rejected with 400 Bad Request and the
+// message "Conditional request headers are not allowed in unsafe requests
+// unless supported by the endpoint". The defense-in-depth re-read at
+// `acquireDispatchLock` now serves as the sole concurrency primitive.
 //
-// This version uses true ETag optimistic concurrency control on the GitHub
-// Gists REST API. Properties:
+// Properties:
 //
-// - Acquisition: PATCH with `If-Match: <etag>`. GitHub returns
-//   **412 Precondition Failed** when any concurrent write has modified the
-//   gist since we read its etag. Atomic at GitHub's data layer.
+// - Acquisition: PATCH (no If-Match) followed by re-read confirming our
+//   `lockId` landed. Race window is the ~milliseconds between PATCH and
+//   re-read. With 2h dispatch cron cadence this is acceptable; for higher-
+//   frequency callers, a separate concurrency layer is needed.
 // - TTL: `expiresAt` integer (ms). Peer machines evaluate against local
 //   wall-clock; expired locks are reclaimable. Default 15 minutes.
 // - Fencing token: monotonic counter embedded in the lock payload. Downstream
@@ -19,12 +22,14 @@
 //   downstream checking is a future phase.)
 // - Release: `null` payload deletes `lock.json` entirely (cleaner than
 //   writing ghost state).
-// - Defense-in-depth: after successful PATCH, re-reads and checks that our
-//   own `lockId` is on the gist, in case GitHub ever stops enforcing If-Match
-//   on gists specifically.
 // - Fail-open: no GITHUB_TOKEN OR any thrown exception returns
 //   `{ acquired: true, degraded: true }` so single-machine setups still
 //   dispatch.
+//
+// Function names retained for diff minimality: `writeLockWithIfMatch` and
+// `readLockWithEtag` no longer use If-Match but keep their historical names
+// to avoid touching callers and tests beyond what the bug fix requires.
+// A future refactor can rename to `writeLockFile` / `readLockFile`.
 
 import { randomUUID } from "node:crypto";
 
@@ -35,72 +40,39 @@ const USER_AGENT = "budget-dispatcher-lock";
 
 /**
  * Read the whole gist, extract lock.json, and return { data, etag, status }.
+ * Thin wrapper over `readGistFile` with the lock filename hard-coded.
+ *
  * `data` is the parsed lock payload (or null if absent/unparseable).
- * `etag` is the HTTP ETag of the gist as a whole; passed back as If-Match
- * on the subsequent PATCH for atomic acquisition.
+ * `etag` is the HTTP ETag of the gist as a whole. Historically passed back
+ * as If-Match; post-Bug-E it's still returned (callers may store/log it for
+ * change detection) but the write path no longer sends If-Match.
  *
  * @param {string} gistId
  * @param {{ token?: string }} [opts]
- * @returns {Promise<{ data: object|null, etag: string|null, status: number }>}
+ * @returns {Promise<{ data: object|null, etag: string|null, status: number, malformed?: boolean }>}
  */
 export async function readLockWithEtag(gistId, opts = {}) {
-  const headers = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": USER_AGENT,
-  };
-  if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
-
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    headers,
-    signal: AbortSignal.timeout(GIST_TIMEOUT_MS),
-  });
-  if (!resp.ok) return { data: null, etag: null, status: resp.status };
-
-  const etag = resp.headers.get("etag");
-  const gist = await resp.json();
-  const file = gist.files?.[LOCK_FILENAME];
-
-  let data = null;
-  if (file?.content) {
-    try {
-      data = JSON.parse(file.content);
-    } catch {
-      // Malformed lock payload — treat as absent. Next acquire will overwrite.
-    }
-  }
-  return { data, etag, status: 200 };
+  return readGistFile(gistId, LOCK_FILENAME, opts);
 }
 
 /**
- * Write (or delete, with payload=null) the lock file with optional If-Match
- * header. Returns HTTP status so the caller can distinguish 412 (lost race)
- * from other failures (network, auth).
+ * Write (or delete, with payload=null) the lock file. Thin wrapper over
+ * `writeGistFile` with the lock filename hard-coded. Returns HTTP status so
+ * the caller can distinguish failures (network, auth, GitHub-side 5xx).
+ *
+ * Historically used `If-Match: <etag>` for ETag-CAS, but the GitHub gists
+ * API rejects conditional headers on PATCH with 400 (Bug E, 2026-04-27).
+ * `opts.etag` is now ignored; concurrency safety lives in the re-read
+ * confirmation in `acquireDispatchLock`.
  *
  * @param {string} gistId
  * @param {object|null} payload - JSON body for lock.json, or null to delete.
- * @param {{ token: string, etag?: string|null }} opts
+ * @param {{ token: string, etag?: string|null }} opts - `etag` is accepted
+ *        but ignored, retained for callsite stability.
  * @returns {Promise<{ ok: boolean, status: number }>}
  */
 export async function writeLockWithIfMatch(gistId, payload, opts) {
-  const headers = {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${opts.token}`,
-    "Content-Type": "application/json",
-    "User-Agent": USER_AGENT,
-  };
-  if (opts.etag) headers["If-Match"] = opts.etag;
-
-  const body = payload === null
-    ? { files: { [LOCK_FILENAME]: null } }
-    : { files: { [LOCK_FILENAME]: { content: JSON.stringify(payload, null, 2) } } };
-
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    method: "PATCH",
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(GIST_TIMEOUT_MS),
-  });
-  return { ok: resp.ok, status: resp.status };
+  return writeGistFile(gistId, LOCK_FILENAME, payload, opts);
 }
 
 /**
@@ -152,19 +124,17 @@ export async function acquireDispatchLock(gistId, machine, opts = {}) {
       lockId,
     };
 
-    const { ok, status } = await write(gistId, payload, { token, etag });
+    const { ok, status } = await write(gistId, payload, { token });
 
     if (!ok) {
-      if (status === 412) {
-        return { acquired: false, reason: "lost ETag race (gist changed during acquisition)" };
-      }
       console.warn(`[gist-lock] write failed (status ${status}); proceeding without lock (fail-open)`);
       return { acquired: true, lockId: null, degraded: true };
     }
 
-    // Defense-in-depth: re-read to confirm our lockId landed. If GitHub ever
-    // silently stops enforcing If-Match on gists (undocumented change), this
-    // catches the resulting race. Cheap: one extra HTTP call on the happy path.
+    // Concurrency primitive (post-Bug-E): re-read to confirm our lockId
+    // landed. If a peer wrote in the ~ms window between our PATCH and
+    // re-read, their lockId is on the gist and we lose. Cheap: one extra
+    // HTTP call on the happy path.
     const confirm = await read(gistId, { token });
     if (confirm.data?.lockId === lockId) {
       return { acquired: true, lockId, fencingToken };
@@ -185,7 +155,8 @@ export async function acquireDispatchLock(gistId, machine, opts = {}) {
  *
  * Fail-soft: any HTTP error returns `{ data: null, etag: null, status }`.
  * `malformed: true` is set when the file exists but isn't valid JSON; the
- * caller can choose to overwrite or fail-soft.
+ * caller can choose to overwrite or fail-soft. ETag is returned for change-
+ * detection / logging; the write path no longer sends If-Match (Bug E).
  *
  * @param {string} gistId
  * @param {string} filename - e.g. "pending-merges.json"
@@ -216,14 +187,22 @@ export async function readGistFile(gistId, filename, opts = {}) {
 }
 
 /**
- * Write (or delete via payload=null) a single named file in the gist with
- * optional If-Match ETag concurrency control. Generic version of
- * writeLockWithIfMatch.
+ * Write (or delete via payload=null) a single named file in the gist.
+ * Generic version of writeLockWithIfMatch for non-lock files (gate-7's
+ * pending-merges.json).
+ *
+ * Historically used `If-Match: <etag>` for ETag-CAS, but the GitHub gists
+ * API rejects conditional headers on PATCH with 400 (Bug E, 2026-04-27).
+ * `opts.etag` is now ignored. Callers needing concurrency safety must
+ * implement it at a higher layer (read-modify-write + idempotency by
+ * domain key, e.g. pending-merges entries are de-duplicated by
+ * (repo, pr_number, merge_commit_sha) tuple).
  *
  * @param {string} gistId
  * @param {string} filename
  * @param {object|null} payload
- * @param {{ token: string, etag?: string|null }} opts
+ * @param {{ token: string, etag?: string|null }} opts - `etag` is accepted
+ *        but ignored, retained for callsite stability.
  * @returns {Promise<{ ok: boolean, status: number }>}
  */
 export async function writeGistFile(gistId, filename, payload, opts) {
@@ -233,7 +212,6 @@ export async function writeGistFile(gistId, filename, payload, opts) {
     "Content-Type": "application/json",
     "User-Agent": USER_AGENT,
   };
-  if (opts.etag) headers["If-Match"] = opts.etag;
 
   const body = payload === null
     ? { files: { [filename]: null } }

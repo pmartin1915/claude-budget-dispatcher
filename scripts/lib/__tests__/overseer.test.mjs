@@ -1923,31 +1923,87 @@ describe("writePendingMergeEntry against createDefaultGistClient -- Bug D fetch-
     },
   ));
 
-  it("retries once on 412 ETag conflict and succeeds on second attempt", async () => {
-    // Stateful fetch: first PATCH -> 412, GET re-read returns fresh etag,
-    // second PATCH -> 200. Verifies the CAS retry path in
-    // writePendingMergeEntry (lines 1377-1380).
+  it("PATCH never includes If-Match header (Bug E regression: gists API rejects conditional headers with 400)", async () => {
+    // Bug E (2026-04-27): writePendingMergeEntry used to forward read.etag as
+    // If-Match on the PATCH. GitHub gists API rejects this with 400 Bad
+    // Request. The fix drops the If-Match header entirely. This test asserts
+    // the PATCH request body sent to fetch carries no `If-Match` key in
+    // its headers object, regardless of what etag the read returned.
     const realFetch = globalThis.fetch;
-    let writeAttempt = 0;
-    let etagSeq = 0;
+    let patchHeaders = null;
     globalThis.fetch = async (url, opts) => {
       if (!opts?.method || opts.method === "GET") {
-        etagSeq++;
-        return gistJsonResponse({}, `W/"etag-${etagSeq}"`);
+        return gistJsonResponse({}, 'W/"etag-from-read"');
       }
-      writeAttempt++;
-      if (writeAttempt === 1) return fetchErrorResponse(412, "Precondition Failed");
+      patchHeaders = opts.headers ?? {};
       return emptyOkResponse(200);
     };
     try {
       const client = createDefaultGistClient("g123", "tok");
       const out = await writePendingMergeEntry({ gistClient: client, entry: SAMPLE_PENDING_ENTRY });
       assert.equal(out.ok, true);
-      // writePendingMergeEntry only adorns `retried:true` when the SECOND
-      // attempt also fails (returns the failure with the retried flag);
-      // on second-attempt success it returns the bare success object.
-      // The proof of CAS retry is the writeAttempt counter, not a flag.
-      assert.equal(writeAttempt, 2, "must have made exactly 2 PATCH attempts (412 then success)");
+      assert.ok(patchHeaders, "PATCH must have fired");
+      // Case-insensitive scan: GitHub-side and various HTTP libs normalize
+      // header names differently, so check both forms explicitly.
+      const headerKeys = Object.keys(patchHeaders).map((k) => k.toLowerCase());
+      assert.equal(
+        headerKeys.includes("if-match"),
+        false,
+        `PATCH must NOT include an If-Match header; got headers: ${JSON.stringify(Object.keys(patchHeaders))}`,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("does NOT retry on 412 (post-Bug-E: 412 is unreachable from prod, single attempt only)", async () => {
+    // Bug E removed the 412 retry branch in writePendingMergeEntry because
+    // GitHub gists API doesn't support If-Match (the only way 412 could
+    // surface). If a stub still returns 412, the result is a single failed
+    // attempt with the failure carried back to the caller.
+    const realFetch = globalThis.fetch;
+    let writeAttempt = 0;
+    globalThis.fetch = async (url, opts) => {
+      if (!opts?.method || opts.method === "GET") {
+        return gistJsonResponse({}, 'W/"etag1"');
+      }
+      writeAttempt++;
+      return fetchErrorResponse(412, "Precondition Failed");
+    };
+    try {
+      const client = createDefaultGistClient("g123", "tok");
+      const out = await writePendingMergeEntry({ gistClient: client, entry: SAMPLE_PENDING_ENTRY });
+      assert.equal(out.ok, false);
+      assert.equal(out.status, 412);
+      assert.equal(writeAttempt, 1, "must make exactly 1 PATCH attempt -- no retry post-Bug-E");
+      // No `retried:true` flag -- that field was tied to the now-deleted retry path.
+      assert.equal(out.retried, undefined);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("surfaces a 400 Bad Request (Bug E live signature) cleanly via reason", async () => {
+    // Bug E's live observable was a 400 with the message "Conditional request
+    // headers are not allowed in unsafe requests unless supported by the
+    // endpoint". Pre-fix, this came from the gists API rejecting If-Match.
+    // Post-fix, the code path that produced 400 is gone -- but if the gist
+    // PATCH ever returns 400 for ANY reason in the future, the reason field
+    // should carry the GistError-formatted message intact (same shape as
+    // the 403 test above).
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      if (!opts?.method || opts.method === "GET") {
+        return gistJsonResponse({}, 'W/"etag1"');
+      }
+      return fetchErrorResponse(400, "Bad Request", "Conditional request headers are not allowed");
+    };
+    try {
+      const client = createDefaultGistClient("g123", "tok");
+      const out = await writePendingMergeEntry({ gistClient: client, entry: SAMPLE_PENDING_ENTRY });
+      assert.equal(out.ok, false);
+      assert.equal(out.status, 400);
+      assert.match(out.reason, /gist 400/);
     } finally {
       globalThis.fetch = realFetch;
     }

@@ -524,11 +524,14 @@ export async function runPostMergeMonitor(args) {
   let gistWriteOutcome = { ok: true, status: 200, reason: wroteAnything ? "wrote" : "nothing-to-write" };
   if (wroteAnything) {
     try {
-      const w = await write(gistId, PENDING_MERGES_GIST_FILE, newPayload, { token: gistToken, etag: pending?.etag ?? null });
+      // No If-Match: GitHub gists API rejects conditional PATCH headers (Bug E,
+      // 2026-04-27). Concurrency is safe via deadline-driven idempotency:
+      // categorizeEntries treats already-completed entries as GC'd, so a
+      // concurrent writer's stale view appending a duplicate would dedupe
+      // on the next tick when the entry is re-categorized as completed.
+      const w = await write(gistId, PENDING_MERGES_GIST_FILE, newPayload, { token: gistToken });
       if (!w.ok) {
-        // 412 = lost CAS race. Don't retry within this tick to avoid a tight
-        // loop with another writer; next dispatcher cycle will pick it up.
-        gistWriteOutcome = { ok: false, status: w.status, reason: w.status === 412 ? "etag-cas-lost" : "write-failed" };
+        gistWriteOutcome = { ok: false, status: w.status, reason: "write-failed" };
         log({ outcome: "gist-write-failed", status: w.status });
       } else {
         gistWriteOutcome = { ok: true, status: w.status };

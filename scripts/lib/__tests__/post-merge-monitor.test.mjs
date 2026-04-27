@@ -560,7 +560,12 @@ describe("runPostMergeMonitor()", () => {
     assert.equal(written.entries[0].replays_done, 1);
   });
 
-  it("412 ETag CAS lost -> fail-soft skip (no retry within tick)", async () => {
+  it("non-2xx gist write (e.g. 412 or any error) -> fail-soft, replay still ran", async () => {
+    // Bug E (2026-04-27): GitHub gists API rejects If-Match on PATCH with 400.
+    // The post-merge-monitor's writeGistFile call no longer forwards an etag.
+    // The "etag-cas-lost" reason was removed since 412 is no longer a
+    // domain-meaningful status (it can only be returned by the test mock).
+    // Any non-ok write is now categorized uniformly as "write-failed".
     const ap = mockAppender();
     const project = { slug: "demo", path: process.cwd(), canary_command: ["x"], canary_timeout_ms: 1000 };
     const dueEntry = { repo: "a/b", pr_number: 1, project_slug: "demo", merge_commit_sha: "merged123", merged_at_ms: NOW - FIFTEEN_MIN, replays_done: 0, next_deadline_ms: NOW - 1, replay_schedule_ms: DEFAULT_SCHEDULE, completed: false };
@@ -580,9 +585,40 @@ describe("runPostMergeMonitor()", () => {
       now: () => NOW,
       mkdtemp: () => "/tmp/test-tmp",
     });
-    // Replay still ran; gist write failed soft.
+    // Replay still ran; gist write failed soft, uniform reason.
     assert.equal(summary.processed, 1);
     assert.equal(summary.gist_outcome.ok, false);
-    assert.equal(summary.gist_outcome.reason, "etag-cas-lost");
+    assert.equal(summary.gist_outcome.status, 412);
+    assert.equal(summary.gist_outcome.reason, "write-failed");
+  });
+
+  it("processOneEntry -> writeGistFile is called WITHOUT etag opt (Bug E regression)", async () => {
+    // Asserts the post-Bug-E call shape: write(gistId, filename, payload,
+    // { token: gistToken }) with no `etag` key. The mock's spy records
+    // received opts so we can introspect them.
+    const ap = mockAppender();
+    const project = { slug: "demo", path: process.cwd(), canary_command: ["x"], canary_timeout_ms: 1000 };
+    const dueEntry = { repo: "a/b", pr_number: 1, project_slug: "demo", merge_commit_sha: "merged123", merged_at_ms: NOW - FIFTEEN_MIN, replays_done: 0, next_deadline_ms: NOW - 1, replay_schedule_ms: DEFAULT_SCHEDULE, completed: false };
+    const gistFns = mockGistFns({
+      readResp: { data: { schema_version: 1, entries: [dueEntry] }, etag: "e-from-read" },
+      writeResp: { ok: true, status: 200 },
+    });
+    await runPostMergeMonitor({
+      gistId: "gid", gistToken: "tok",
+      projectsInRotation: [project],
+      ntfyTopic: null, ntfyEnabled: false,
+      gistFns,
+      gh: mockGh(),
+      git: mockGit(),
+      runner: mockRunner({ exitCode: 0 }),
+      appender: ap.fn,
+      now: () => NOW,
+      mkdtemp: () => "/tmp/test-tmp",
+    });
+    assert.equal(gistFns.calls.writes.length, 1, "expected exactly one gist write");
+    const writeOpts = gistFns.calls.writes[0].opts ?? {};
+    assert.equal(writeOpts.token, "tok");
+    // Critical: no etag forwarded. If this regresses, GitHub returns 400.
+    assert.equal(writeOpts.etag, undefined, `writeGistFile must NOT receive an etag opt; got ${JSON.stringify(writeOpts)}`);
   });
 });
