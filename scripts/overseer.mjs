@@ -1503,14 +1503,26 @@ function parseArgv(argv) {
   return out;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const cli = parseArgv(process.argv.slice(2));
+/**
+ * CLI entrypoint extracted into an exported function so the env-var
+ * resolution + argv parsing + dependency wiring path is end-to-end testable
+ * with injected mocks (Bug C regression coverage). Returns the runOverseer
+ * results array; the wrapper below adds process.exit(0) for the real CLI.
+ *
+ * Bug C fix (2026-04-26): the prior `if (cli.repo) reposCfg = [cli.repo];`
+ * line destructively overwrote object-form OVERSEER_REPOS_JSON entries with
+ * bare strings, killing per-repo auto_merge/merge_strategy/project_slug.
+ * The runOverseer call already passes `only.repo` for filtering at
+ * overseer.mjs:1459, so the override was redundant AND destructive. Removed.
+ */
+export async function runCli({ argv, env = process.env, deps = {} } = {}) {
+  const cli = parseArgv(argv);
   // Reposcfg can come from OVERSEER_REPOS_JSON (preferred for gate 6 -- carries
   // per-repo auto_merge / merge_strategy / project_slug) or OVERSEER_REPOS (CSV,
   // legacy bare strings). The Actions workflow plumbs the JSON variant from
   // shared.json via a setup step.
   let reposCfg = [];
-  const reposJson = (process.env.OVERSEER_REPOS_JSON ?? "").trim();
+  const reposJson = (env.OVERSEER_REPOS_JSON ?? "").trim();
   if (reposJson) {
     try {
       const parsed = JSON.parse(reposJson);
@@ -1520,14 +1532,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
   }
   if (reposCfg.length === 0) {
-    const reposCsv = process.env.OVERSEER_REPOS ?? "";
+    const reposCsv = env.OVERSEER_REPOS ?? "";
     reposCfg = reposCsv.split(",").map((s) => s.trim()).filter(Boolean);
   }
-  if (cli.repo) reposCfg = [cli.repo];
-  const ghToken = process.env.OVERSEER_GH_TOKEN || undefined;
-  const geminiApiKey = process.env.GEMINI_API_KEY || "";
-  const mistralApiKey = process.env.MISTRAL_API_KEY || "";
-  const gistId = process.env.STATUS_GIST_ID || "";
+  // (Bug C fix: NO `if (cli.repo) reposCfg = [cli.repo];` here. Filtering
+  // happens via runOverseer's `only.repo` parameter at overseer.mjs:1459.)
+  const ghToken = env.OVERSEER_GH_TOKEN || undefined;
+  const geminiApiKey = env.GEMINI_API_KEY || "";
+  const mistralApiKey = env.MISTRAL_API_KEY || "";
+  const gistId = env.STATUS_GIST_ID || "";
   // Gist-auth fallback (host-aware). On Actions runners the auto-provisioned
   // GITHUB_TOKEN does NOT carry `gist` scope, so we fall back to
   // OVERSEER_GH_TOKEN (the same PAT used for the PR labeling/merging API
@@ -1536,14 +1549,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // GITHUB_TOKEN instead because operator hosts typically have it set with
   // a full-scope PAT. Each host uses the most-likely-scoped token already
   // in its environment. PAL focus 4 / 2026-04-28.
-  const gistToken = process.env.GIST_AUTH_TOKEN || ghToken;
-  const topLevelAutoMerge = (process.env.OVERSEER_AUTO_MERGE ?? "").toLowerCase() === "true";
-  const coolingOffMinutes = Number.parseFloat(process.env.OVERSEER_COOLING_OFF_MINUTES ?? "") || undefined;
-  const coolingOffMinutesAfterReady = Number.parseFloat(process.env.OVERSEER_COOLING_OFF_MINUTES_AFTER_READY ?? "") || undefined;
+  const gistToken = env.GIST_AUTH_TOKEN || ghToken;
+  const topLevelAutoMerge = (env.OVERSEER_AUTO_MERGE ?? "").toLowerCase() === "true";
+  // Explicit NaN check (not `|| undefined`) so an operator-set value of "0" is
+  // honored. The downstream runOverseer / evaluateCoolingOff signatures use ES
+  // default-args (= DEFAULT_*) which only activate when the arg is undefined,
+  // so 0 correctly overrides the default. PAL audit MEDIUM 2026-04-26.
+  const coolingOffMinutesRaw = Number.parseFloat(env.OVERSEER_COOLING_OFF_MINUTES ?? "");
+  const coolingOffMinutes = Number.isNaN(coolingOffMinutesRaw) ? undefined : coolingOffMinutesRaw;
+  const coolingOffMinutesAfterReadyRaw = Number.parseFloat(env.OVERSEER_COOLING_OFF_MINUTES_AFTER_READY ?? "");
+  const coolingOffMinutesAfterReady = Number.isNaN(coolingOffMinutesAfterReadyRaw) ? undefined : coolingOffMinutesAfterReadyRaw;
 
-  const gh = createDefaultGitHubClient(ghToken);
-  const palCallFn = createDefaultPalCallFn({ geminiApiKey, mistralApiKey });
-  const gistClient = gistId ? createDefaultGistClient(gistId, gistToken) : null;
+  const gh = deps.gh ?? createDefaultGitHubClient(ghToken);
+  const palCallFn = deps.palCallFn ?? createDefaultPalCallFn({ geminiApiKey, mistralApiKey });
+  const gistClient = deps.gistClient !== undefined
+    ? deps.gistClient
+    : (gistId ? createDefaultGistClient(gistId, gistToken) : null);
 
   // asciiSafeHeader is exercised here so static analysis/tooling sees it as live.
   const repoLabels = normalizeRepoList(reposCfg);
@@ -1557,6 +1578,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     gh,
     gistClient,
     palCallFn,
+    ...(deps.now ? { now: deps.now } : {}),
     only: cli.prNumber || cli.repo ? { prNumber: cli.prNumber, repo: cli.repo } : null,
   });
 
@@ -1566,5 +1588,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (results.length === 0) {
     console.log("[overseer] no PRs processed this run");
   }
+  return results;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await runCli({ argv: process.argv.slice(2), env: process.env });
   process.exit(0);
 }
