@@ -34,3 +34,6 @@ status/dispatcher-runs/*
 
 # Compiled tray app (rebuild with scripts\build-tray.cmd)
 bin/
+
+# Backups produced by scripts/migrate-local-projects.mjs (timestamped)
+config/local.json.bak-*

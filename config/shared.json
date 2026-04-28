@@ -101,5 +101,106 @@
   },
 
   "commit_policy": "local-auto-branch-only",
-  "branch_prefix": "auto/"
+  "branch_prefix": "auto/",
+
+  "$comment_projects_in_rotation": "Canonical fleet-wide project list. Each coder machine sees these on next git pull + cron tick. Per-machine overrides (e.g. different path, project disabled on one machine) live in local.json projects_in_rotation and are merged BY SLUG (see scripts/lib/config.mjs mergeProjectsBySlug). Opt-in to auto_push: set per-project auto_push:true AND populate auto_push_allowlist AND set canary_command. Top-level auto_push (above) gates the whole fleet.",
+  "projects_in_rotation": [
+    {
+      "slug": "burn-wizard",
+      "path": "c:/Users/perry/DevProjects/burn-wizard",
+      "clinical_gate": true,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "coverage", "clean", "lint"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "wilderness",
+      "path": "c:/Users/perry/DevProjects/wilderness",
+      "clinical_gate": false,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "sandbox-workflow-enhancement",
+      "path": "c:/Users/perry/DevProjects/sandbox/extra-sub-standalone-workflow-enhancement",
+      "clinical_gate": false,
+      "sandbox": true,
+      "opportunistic_tasks": [
+        "explore", "research", "proposal", "tests-gen",
+        "docs-gen", "session-log", "self-audit", "roadmap-review"
+      ],
+      "auto_push": true,
+      "auto_push_allowlist": [
+        "docs/notes/**",
+        "docs/research/**",
+        "docs/proposals/*.md",
+        "sessions/*.md",
+        "ai/AUDIT.md"
+      ],
+      "canary_command": ["node", "scripts/validate-proposals.mjs"],
+      "canary_timeout_ms": 30000
+    },
+    {
+      "slug": "boardbound",
+      "path": "c:/Users/perry/DevProjects/BoardBound/boardbound",
+      "clinical_gate": false,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean", "lint"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "combo",
+      "path": "c:/Users/perry/DevProjects/combo",
+      "clinical_gate": true,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "frontier",
+      "path": "c:/Users/perry/DevProjects/frontier",
+      "clinical_gate": false,
+      "opportunistic_tasks": ["audit", "explore", "docs-gen"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "sprite-forge",
+      "path": "c:/Users/perry/DevProjects/sprite-forge",
+      "clinical_gate": false,
+      "opportunistic_tasks": ["audit", "explore", "clean"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "medilex",
+      "path": "c:/Users/perry/DevProjects/medilex",
+      "clinical_gate": true,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "slug": "ecg-wizard-pwa",
+      "path": "c:/Users/perry/DevProjects/ecg-wizard-pwa",
+      "clinical_gate": true,
+      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
+      "auto_push": false,
+      "auto_push_allowlist": []
+    },
+    {
+      "$comment": "canary_command lives here so every coder machine has it on auto-pull. Without it, gate 7 logs canary-command-missing on each pending-merges replay attempt and degraded ntfy fires (the alert that prompted promoting projects_in_rotation to shared.json).",
+      "slug": "sandbox-canary-test",
+      "path": "c:/Users/perry/DevProjects/sandbox/extra-sub-standalone-canary-test",
+      "clinical_gate": false,
+      "sandbox": true,
+      "canary": true,
+      "opportunistic_tasks": ["test", "audit", "clean", "docs-gen"],
+      "auto_push": false,
+      "auto_push_allowlist": ["docs/smoke-runs/**"],
+      "canary_command": ["npm.cmd", "test"],
+      "canary_timeout_ms": 60000
+    }
+  ]
 }

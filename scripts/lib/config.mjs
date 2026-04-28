@@ -14,15 +14,65 @@ const LOCAL_PATH = join(CONFIG_DIR, "local.json");
 const LEGACY_PATH = join(CONFIG_DIR, "budget.json");
 
 /**
- * Deep merge b into a. Arrays from b replace (not concat) arrays in a.
+ * Merge two `projects_in_rotation`-style arrays by `slug`.
+ * Override entries with matching slug are deep-merged into the base entry.
+ * Override entries with a new slug are appended.
+ * Override entries without a slug are skipped (with a warning) — schema
+ * normally enforces slug presence; this is defense in depth.
+ *
+ * @param {Array<object>} base
+ * @param {Array<object>} override
+ * @returns {Array<object>}
+ */
+function mergeProjectsBySlug(base, override) {
+  // structuredClone (Node 17+) for true deep isolation: callers can mutate
+  // the returned merged config without aliasing back into the input arrays.
+  const out = base.map((p) => structuredClone(p));
+  for (const item of override) {
+    if (!item || typeof item.slug !== "string") {
+      console.warn(
+        "[config] projects_in_rotation override entry missing slug; skipping",
+      );
+      continue;
+    }
+    const idx = out.findIndex((x) => x.slug === item.slug);
+    if (idx >= 0) {
+      // Deep-merge so partial overrides work (e.g. {slug, path} only changes path).
+      deepMerge(out[idx], item);
+    } else {
+      out.push(structuredClone(item));
+    }
+  }
+  return out;
+}
+
+/**
+ * Deep merge b into a. Arrays from b replace (not concat) arrays in a, EXCEPT
+ * the top-level `projects_in_rotation` key which is merged by `slug` so
+ * machine-specific local overrides can mutate individual project entries
+ * without clobbering the fleet-wide list shipped via shared.json.
+ *
+ * The by-slug merge is gated on `depth === 0` so that a future schema with a
+ * nested key incidentally named `projects_in_rotation` (e.g. inside a
+ * `presets` block) keeps the standard array-replace semantics rather than
+ * silently inheriting per-slug merging.
+ *
  * @param {object} a - base
  * @param {object} b - overrides
+ * @param {number} [depth=0] - recursion depth (0 = top-level call)
  * @returns {object} merged (mutates a)
  */
-function deepMerge(a, b) {
+function deepMerge(a, b, depth = 0) {
   for (const key of Object.keys(b)) {
     if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
     if (
+      depth === 0 &&
+      key === "projects_in_rotation" &&
+      Array.isArray(a[key]) &&
+      Array.isArray(b[key])
+    ) {
+      a[key] = mergeProjectsBySlug(a[key], b[key]);
+    } else if (
       b[key] !== null &&
       typeof b[key] === "object" &&
       !Array.isArray(b[key]) &&
@@ -30,7 +80,7 @@ function deepMerge(a, b) {
       typeof a[key] === "object" &&
       !Array.isArray(a[key])
     ) {
-      deepMerge(a[key], b[key]);
+      deepMerge(a[key], b[key], depth + 1);
     } else {
       a[key] = b[key];
     }
@@ -136,4 +186,13 @@ export function materializeConfig() {
   return config;
 }
 
-export { SHARED_PATH, LOCAL_PATH, LEGACY_PATH, CONFIG_DIR };
+export {
+  SHARED_PATH,
+  LOCAL_PATH,
+  LEGACY_PATH,
+  CONFIG_DIR,
+  mergeProjectsBySlug,
+  // Exported for test coverage of the depth-0 gate; not part of the
+  // dispatcher's public config API.
+  deepMerge as _deepMergeForTests,
+};
