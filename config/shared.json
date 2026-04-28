@@ -190,6 +190,17 @@
       "auto_push_allowlist": []
     },
     {
+      "$comment": "Worldbuilder Pillar 2 Phase 1 (2026-04-28). canary_command runs canon-canary which validates frontmatter id/civilization namespace + cross_refs against design/narrative-schema/canon.json. Mechanism dormant on ship: auto_push:false. Real opt-in waits on (a) sandbox-workflow-enhancement smoking 3 clean cycles, (b) hand-crafted draft PR exercising canon-canary against a real LLM diff. See worldbuilder/docs/CANON-CANARY.md.",
+      "slug": "worldbuilder",
+      "path": "c:/Users/perry/DevProjects/worldbuilder",
+      "clinical_gate": false,
+      "opportunistic_tasks": ["audit", "explore", "docs-gen"],
+      "auto_push": false,
+      "auto_push_allowlist": ["docs/**", "design/narrative-schema/docs/**"],
+      "canary_command": ["node", "scripts/canon-canary.mjs"],
+      "canary_timeout_ms": 45000
+    },
+    {
       "$comment": "canary_command lives here so every coder machine has it on auto-pull. Without it, gate 7 logs canary-command-missing on each pending-merges replay attempt and degraded ntfy fires (the alert that prompted promoting projects_in_rotation to shared.json).",
       "slug": "sandbox-canary-test",
       "path": "c:/Users/perry/DevProjects/sandbox/extra-sub-standalone-canary-test",
