@@ -4,6 +4,7 @@
 // Mirrors watchdog.test.mjs / auto-push.test.mjs conventions: node:test,
 // node:assert/strict, all I/O via injected fetcher/palCallFn/appender/now.
 
+import "./_test-status-dir.mjs"; // Must be first -- redirects fallback writes
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {

@@ -1,23 +1,23 @@
 // log.test.mjs — Unit tests for log.mjs.
 // Covers: appendLog, writeLastRun, countTodayRuns, rotateLog.
 // Uses Node built-in test runner. Zero deps.
+//
+// Tests redirect log.mjs's writes to a tmpdir via BUDGET_DISPATCH_STATUS_DIR
+// (set by _test-status-dir.mjs) so they cannot pollute the live status/
+// files. The prelude must be imported before log.mjs so its module-load
+// path resolution sees the override.
 
+import "./_test-status-dir.mjs"; // Must be first -- sets env var
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 import { appendLog, writeLastRun, countTodayRuns, rotateLog } from "../log.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const STATUS_DIR = resolve(__dirname, "..", "..", "..", "status");
-const LOG_PATH = resolve(STATUS_DIR, "budget-dispatch-log.jsonl");
-const LAST_RUN_PATH = resolve(STATUS_DIR, "budget-dispatch-last-run.json");
-
-// ---------------------------------------------------------------------------
-// Tests against the real status/ directory (safe — only appends)
-// ---------------------------------------------------------------------------
+const TEST_STATUS_DIR = process.env.BUDGET_DISPATCH_STATUS_DIR;
+const LOG_PATH = resolve(TEST_STATUS_DIR, "budget-dispatch-log.jsonl");
+const LAST_RUN_PATH = resolve(TEST_STATUS_DIR, "budget-dispatch-last-run.json");
 
 describe("appendLog", () => {
   it("appends a JSONL record with timestamp", async () => {

@@ -5,7 +5,13 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const STATUS_DIR = resolve(__dirname, "..", "..", "status");
+// BUDGET_DISPATCH_STATUS_DIR overrides the default for tests, preventing
+// unit-test fixtures (e.g. {outcome:"test-success", duration_ms:1234})
+// from polluting the live JSONL/last-run files that fleet.mjs syncs to
+// the status gist. Production reads the resolved default.
+const STATUS_DIR = process.env.BUDGET_DISPATCH_STATUS_DIR
+  ? resolve(process.env.BUDGET_DISPATCH_STATUS_DIR)
+  : resolve(__dirname, "..", "..", "status");
 const LOG_PATH = resolve(STATUS_DIR, "budget-dispatch-log.jsonl");
 const LAST_RUN_PATH = resolve(STATUS_DIR, "budget-dispatch-last-run.json");
 

@@ -17,6 +17,10 @@ status/alerting-state.json
 status/merge-tracker.json
 status/last-auto-pull.json
 
+# Rotated JSONL archives + ad-hoc backups produced during operator cleanup
+status/budget-dispatch-log-archive-*.jsonl
+status/*.bak-*
+
 # Weekly maintenance marker files (C-4 git fsck, S-8 npm audit)
 status/last-*.txt
 

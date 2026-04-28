@@ -46,7 +46,13 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const STATUS_DIR = resolve(__dirname, "..", "status");
+// BUDGET_DISPATCH_STATUS_DIR overrides the default for tests. runCli falls
+// back to defaultAppender when callers don't inject one, and the runCli
+// integration tests don't inject -- without this override, those tests
+// pollute the live JSONL with fixture entries (repo:"o/r" pr_number:42).
+const STATUS_DIR = process.env.BUDGET_DISPATCH_STATUS_DIR
+  ? resolve(process.env.BUDGET_DISPATCH_STATUS_DIR)
+  : resolve(__dirname, "..", "status");
 const LOG_PATH = resolve(STATUS_DIR, "budget-dispatch-log.jsonl");
 
 const USER_AGENT = "budget-dispatcher-overseer";

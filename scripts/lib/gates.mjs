@@ -2,7 +2,7 @@
 // All local, zero LLM tokens.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { countTodayRuns } from "./log.mjs";
@@ -11,6 +11,12 @@ import { getSafeTestEnv } from "./worker.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = resolve(__dirname, "..");
 const REPO_ROOT = resolve(__dirname, "..", "..");
+// BUDGET_DISPATCH_STATUS_DIR overrides the snapshot location for tests so
+// node-engine marker writes don't overwrite the live usage-estimate.json.
+const STATUS_DIR = process.env.BUDGET_DISPATCH_STATUS_DIR
+  ? resolve(process.env.BUDGET_DISPATCH_STATUS_DIR)
+  : resolve(REPO_ROOT, "status");
+const SNAPSHOT_PATH = resolve(STATUS_DIR, "usage-estimate.json");
 
 /**
  * Run all gate checks. Returns { proceed, reason } where proceed=false means
@@ -33,41 +39,64 @@ export function runGates(config, opts = {}) {
     return { proceed: false, reason: "paused-sentinel" };
   }
 
-  // Step 1: Budget gate — always refresh estimate, gate only for Claude engine.
-  // The node engine uses free-tier APIs and doesn't need budget gating, but
-  // refreshing the estimate keeps the snapshot current for auto-mode routing
-  // and monitoring (zero LLM cost — just local file scanning).
+  // Step 1: Budget gate.
+  //
+  // Claude engine: refresh estimate from transcripts and gate. Refreshing has
+  // zero LLM cost (just local file scanning).
+  //
+  // Node engine: skip the estimator entirely and write a minimal marker. The
+  // estimator output uses Claude-Max vocabulary (weekly_pct,
+  // weekly-reserve-floor-threatened) that the node engine doesn't consume,
+  // and fleet.mjs / fleet-<host>.json was surfacing those fields as if they
+  // gated dispatch when in fact node-engine cycles ignore them. The marker
+  // makes readEstimatorSnapshot() naturally return null for the Claude-Max
+  // fields (no .weekly / .trailing30 / .skip_reason keys), so the fleet
+  // dashboard stops showing the misleading "weekly-reserve-floor-threatened"
+  // skip reason against successful node-engine dispatches. Auto-mode in
+  // run-dispatcher.ps1 runs its own estimator before invoking dispatch.mjs,
+  // so it does not depend on this refresh.
   let snapshot = null;
   const isNode = opts.engine === "node";
-  const estimatorScript = resolve(SCRIPTS_DIR, "estimate-usage.mjs");
-  try {
-    execFileSync("node", [estimatorScript], {
-      cwd: REPO_ROOT,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 60_000,
-      env: getSafeTestEnv(),
-    });
-  } catch (e) {
-    if (!isNode) {
+
+  if (isNode) {
+    try {
+      writeFileSync(
+        SNAPSHOT_PATH,
+        JSON.stringify(
+          {
+            engine: "node",
+            refresh_skipped: true,
+            generated_at: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (e) {
+      console.warn(`[gates] failed to write node-engine marker: ${e.message}`);
+    }
+    console.log("[gates] node engine: skipping budget estimator (marker written)");
+  } else {
+    const estimatorScript = resolve(SCRIPTS_DIR, "estimate-usage.mjs");
+    try {
+      execFileSync("node", [estimatorScript], {
+        cwd: REPO_ROOT,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 60_000,
+        env: getSafeTestEnv(),
+      });
+    } catch (e) {
       return { proceed: false, reason: `estimator-error-exit-${e.status ?? "unknown"}` };
     }
-    console.warn(`[gates] estimator refresh failed (non-blocking for node engine): exit ${e.status}`);
-  }
 
-  const snapshotPath = resolve(REPO_ROOT, "status", "usage-estimate.json");
-  if (existsSync(snapshotPath)) {
-    try {
-      snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
-    } catch (parseErr) {
-      if (!isNode) {
+    if (existsSync(SNAPSHOT_PATH)) {
+      try {
+        snapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8"));
+      } catch (parseErr) {
         return { proceed: false, reason: `estimator-snapshot-parse-error: ${parseErr.message}` };
       }
     }
-  }
 
-  if (isNode) {
-    console.log("[gates] budget estimate refreshed (node engine, not gating)");
-  } else {
     if (!snapshot) {
       return { proceed: false, reason: "estimator-no-snapshot" };
     }

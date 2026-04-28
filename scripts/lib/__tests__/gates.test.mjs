@@ -1,9 +1,10 @@
 // gates.test.mjs — Unit tests for runGates() gate logic.
 // Uses Node built-in test runner. Zero deps.
 
+import "./_test-status-dir.mjs"; // Must be first -- redirects marker writes
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -97,6 +98,24 @@ describe("runGates — node engine budget bypass", () => {
     assert.notEqual(r.reason, "estimator-no-snapshot");
     assert.notEqual(r.reason, "gate-red");
     assert.notEqual(r.reason, "estimator-snapshot-parse-error");
+  });
+
+  it("writes a node-engine marker to usage-estimate.json instead of running the estimator", () => {
+    // Marker shape lets fleet.mjs's readEstimatorSnapshot return null for
+    // Claude-Max fields (no .weekly / .trailing30 / .skip_reason keys), so
+    // the dashboard stops surfacing weekly-reserve-floor-threatened against
+    // successful node-engine dispatches.
+    const snapshotPath = resolve(
+      process.env.BUDGET_DISPATCH_STATUS_DIR,
+      "usage-estimate.json",
+    );
+    runGates(baseConfig(), { engine: "node", force: true });
+    const snap = JSON.parse(readFileSync(snapshotPath, "utf8"));
+    assert.equal(snap.engine, "node");
+    assert.equal(snap.refresh_skipped, true);
+    assert.ok(snap.generated_at, "generated_at timestamp should be present");
+    assert.equal(snap.weekly, undefined, "must not carry Claude-Max weekly fields");
+    assert.equal(snap.skip_reason, undefined, "must not carry Claude-Max skip_reason");
   });
 });
 
