@@ -521,6 +521,155 @@ describe("maybeAutoPush() canary gate (gate 4)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// evaluatePathFirewall() -- Bug B: full blocked/allowed arrays (3 new tests)
+// ---------------------------------------------------------------------------
+
+describe("evaluatePathFirewall() Bug B: full blocked/allowed arrays", () => {
+  it("partial block: returns full blockedFiles and allowedFiles arrays, not just first offender", () => {
+    // src/a.js and src/b.js are allowed; README.md and CHANGELOG.md are not.
+    const decision = evaluatePathFirewall({
+      changedFiles: ["src/a.js", "README.md", "src/b.js", "CHANGELOG.md"],
+      allowlist: ["src/**"],
+      protectedGlobs: [],
+    });
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.blockedBy.reason, "outside-allowlist");
+    // Backwards-compat: first offender still present.
+    assert.equal(decision.blockedBy.path, "README.md");
+    // Full arrays.
+    assert.deepEqual(decision.blockedBy.blockedFiles, ["README.md", "CHANGELOG.md"]);
+    assert.deepEqual(decision.blockedBy.allowedFiles, ["src/a.js", "src/b.js"]);
+    assert.deepEqual(decision.blockedBy.changedFiles, ["src/a.js", "README.md", "src/b.js", "CHANGELOG.md"]);
+  });
+
+  it("protected-glob block: blockedFiles is the single hit, allowedFiles are files before it", () => {
+    const decision = evaluatePathFirewall({
+      changedFiles: ["src/a.js", "src/b.js", "package.json", "src/c.js"],
+      allowlist: ["**"],  // permissive -- protected wins first
+      protectedGlobs: ["package.json"],
+    });
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.blockedBy.reason, "protected-glob");
+    assert.equal(decision.blockedBy.path, "package.json");
+    assert.deepEqual(decision.blockedBy.blockedFiles, ["package.json"]);
+    // Files before the hit passed the protected check.
+    assert.deepEqual(decision.blockedBy.allowedFiles, ["src/a.js", "src/b.js"]);
+    assert.deepEqual(decision.blockedBy.changedFiles, ["src/a.js", "src/b.js", "package.json", "src/c.js"]);
+  });
+
+  it("all-allowed path: returns blockedBy:null, and allowedFiles/changedFiles on the root object", () => {
+    const decision = evaluatePathFirewall({
+      changedFiles: ["src/a.js", "tests/b.test.mjs"],
+      allowlist: ["src/**", "tests/**"],
+      protectedGlobs: [],
+    });
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.blockedBy, null);
+    assert.deepEqual(decision.allowedFiles, ["src/a.js", "tests/b.test.mjs"]);
+    assert.deepEqual(decision.changedFiles, ["src/a.js", "tests/b.test.mjs"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maybeAutoPush() Bug B: JSONL log entry carries full file arrays (3 new tests)
+// ---------------------------------------------------------------------------
+
+describe("maybeAutoPush() Bug B: blocked log entries carry full file arrays", () => {
+  it("outside-allowlist: log entry has blocked_files, allowed_files, changed_files_count", async () => {
+    const args = baseHappyArgs();
+    // Only docs/** is allowed; src/ files and README.md are outside the allowlist.
+    args.projectConfig.auto_push_allowlist = ["docs/**"];
+    const git = mockGit({ files: ["src/a.js", "docs/guide.md", "README.md"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "outside-allowlist");
+    // Backwards-compat fields still present.
+    assert.equal(result.blocked_path, "src/a.js");
+    // New fields.
+    assert.deepEqual(result.blocked_files, ["src/a.js", "README.md"]);
+    assert.deepEqual(result.allowed_files, ["docs/guide.md"]);
+    assert.equal(result.changed_files_count, 3);
+    // Same fields appear in the JSONL log entry.
+    const entry = log.calls[0];
+    assert.equal(entry.outcome, "auto-push-blocked");
+    assert.equal(entry.reason, "outside-allowlist");
+    assert.deepEqual(entry.blocked_files, ["src/a.js", "README.md"]);
+    assert.deepEqual(entry.allowed_files, ["docs/guide.md"]);
+    assert.equal(entry.changed_files_count, 3);
+  });
+
+  it("protected-glob: log entry has blocked_files=[hit], allowed_files=files-before-hit", async () => {
+    const args = baseHappyArgs();
+    args.projectConfig.auto_push_allowlist = ["**"];
+    args.globalConfig.auto_push_protected_globs = ["package.json"];
+    const git = mockGit({ files: ["src/a.js", "src/b.js", "package.json"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "protected-glob");
+    assert.equal(result.blocked_path, "package.json");
+    assert.equal(result.matched_pattern, "package.json");
+    assert.deepEqual(result.blocked_files, ["package.json"]);
+    assert.deepEqual(result.allowed_files, ["src/a.js", "src/b.js"]);
+    assert.equal(result.changed_files_count, 3);
+    const entry = log.calls[0];
+    assert.deepEqual(entry.blocked_files, ["package.json"]);
+    assert.deepEqual(entry.allowed_files, ["src/a.js", "src/b.js"]);
+    assert.equal(entry.changed_files_count, 3);
+  });
+
+  it("many-files (>50): blocked_files and allowed_files are truncated to 30; _truncated_count emitted", async () => {
+    const args = baseHappyArgs();
+    // allowlist only covers docs/**; everything else is blocked.
+    args.projectConfig.auto_push_allowlist = ["docs/**"];
+    // Build 60 src files (blocked) + 5 docs files (allowed) = 65 changed.
+    const files = [];
+    for (let i = 0; i < 60; i++) files.push(`src/file${i}.js`);
+    for (let i = 0; i < 5; i++) files.push(`docs/doc${i}.md`);
+    const git = mockGit({ files });
+    const gh = mockGh();
+    const log = mockLogger();
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "outside-allowlist");
+    assert.equal(result.changed_files_count, 65);
+    // Truncated to first 30 blocked.
+    assert.equal(result.blocked_files.length, 30);
+    assert.equal(result.blocked_files_truncated_count, 30); // 60 - 30
+    // Allowed files (5) < 30 so no truncation.
+    assert.equal(result.allowed_files.length, 5);
+    assert.equal(result.allowed_files_truncated_count, undefined);
+    // Same in log entry.
+    const entry = log.calls[0];
+    assert.equal(entry.blocked_files.length, 30);
+    assert.equal(entry.blocked_files_truncated_count, 30);
+    assert.equal(entry.allowed_files.length, 5);
+    assert.equal(entry.changed_files_count, 65);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // evaluateCanary() pure-function unit tests -- 2 tests (config-shape coverage)
 // ---------------------------------------------------------------------------
 

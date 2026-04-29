@@ -113,8 +113,24 @@ export function matchGlob(path, pattern) {
  *   3. For each changed file: if no allowlist pattern matches -> blocked, reason='outside-allowlist'.
  *   4. Otherwise allowed.
  *
+ * Return shape on block:
+ *   { allowed: false, blockedBy: { reason, path, pattern?,
+ *       blockedFiles: string[], allowedFiles: string[], changedFiles: string[] } }
+ *
+ * `path` and `pattern` are kept for backwards-compat (first offender).
+ * `blockedFiles` / `allowedFiles` are the FULL partitioned arrays so operators
+ * can see the complete picture, not just the first failure.
+ *
+ * For empty-allowlist and protected-glob reasons, full partition context is still
+ * surfaced (all files are "blocked" in those cases; empty-allowlist has no allowed
+ * files; protected-glob short-circuits on the first hit so allowedFiles = files
+ * that came before the hit).
+ *
+ * Return shape on allow:
+ *   { allowed: true, blockedBy: null, allowedFiles: string[], changedFiles: string[] }
+ *
  * @param {{ changedFiles: string[], allowlist: string[], protectedGlobs: string[] }} args
- * @returns {{ allowed: boolean, blockedBy: { reason: string, path?: string, pattern?: string } | null }}
+ * @returns {{ allowed: boolean, blockedBy: { reason: string, path?: string, pattern?: string, blockedFiles: string[], allowedFiles: string[], changedFiles: string[] } | null, allowedFiles?: string[], changedFiles?: string[] }}
  */
 export function evaluatePathFirewall({ changedFiles, allowlist, protectedGlobs }) {
   const files = (changedFiles ?? [])
@@ -127,29 +143,47 @@ export function evaluatePathFirewall({ changedFiles, allowlist, protectedGlobs }
     // No changed files = nothing to push. Caller should rarely hit this
     // (verify-commit returns outcome:'no-changes' without a branch in that
     // case), but if it does, the firewall is a no-op.
-    return { allowed: true, blockedBy: null };
+    return { allowed: true, blockedBy: null, allowedFiles: [], changedFiles: files };
   }
 
   if (allow.length === 0) {
     return {
       allowed: false,
-      blockedBy: { reason: "empty-allowlist", path: files[0] },
+      blockedBy: {
+        reason: "empty-allowlist",
+        path: files[0],
+        blockedFiles: files.slice(),
+        allowedFiles: [],
+        changedFiles: files.slice(),
+      },
     };
   }
 
-  // Protected globs win first.
-  for (const file of files) {
+  // Protected globs win first. Scan in file order; short-circuit on first hit.
+  // Files seen before the hit are counted as allowed (they cleared the protected check).
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     for (const pattern of protect) {
       if (matchGlob(file, pattern)) {
         return {
           allowed: false,
-          blockedBy: { reason: "protected-glob", path: file, pattern },
+          blockedBy: {
+            reason: "protected-glob",
+            path: file,
+            pattern,
+            blockedFiles: [file],
+            allowedFiles: files.slice(0, i),
+            changedFiles: files.slice(),
+          },
         };
       }
     }
   }
 
   // Every file must match at least one allowlist pattern.
+  // Collect the full partition before returning so operators see all offenders.
+  const blockedFiles = [];
+  const allowedFiles = [];
   for (const file of files) {
     let matched = false;
     for (const pattern of allow) {
@@ -158,15 +192,27 @@ export function evaluatePathFirewall({ changedFiles, allowlist, protectedGlobs }
         break;
       }
     }
-    if (!matched) {
-      return {
-        allowed: false,
-        blockedBy: { reason: "outside-allowlist", path: file },
-      };
+    if (matched) {
+      allowedFiles.push(file);
+    } else {
+      blockedFiles.push(file);
     }
   }
 
-  return { allowed: true, blockedBy: null };
+  if (blockedFiles.length > 0) {
+    return {
+      allowed: false,
+      blockedBy: {
+        reason: "outside-allowlist",
+        path: blockedFiles[0],       // backwards-compat: first offender
+        blockedFiles,
+        allowedFiles,
+        changedFiles: files.slice(),
+      },
+    };
+  }
+
+  return { allowed: true, blockedBy: null, allowedFiles: files.slice(), changedFiles: files.slice() };
 }
 
 /**
@@ -509,8 +555,32 @@ export async function maybeAutoPush({
         outcome: "auto-push-blocked",
         reason: decision.blockedBy.reason,
       };
+      // Backwards-compat: first offender fields preserved for downstream readers.
       if (decision.blockedBy.path) result.blocked_path = decision.blockedBy.path;
       if (decision.blockedBy.pattern) result.matched_pattern = decision.blockedBy.pattern;
+      // Full partition arrays for operator debugging. Trail-limited to first 30 entries
+      // when the commit has more than 50 changed files; a _truncated_count sibling
+      // tells the operator how many were omitted. Mirrors _trail()'s philosophy:
+      // preserve the most-actionable slice (here, the first blocked files).
+      const FILE_LOG_MAX = 30;
+      const FILE_TRUNC_THRESHOLD = 50;
+      const blocked = decision.blockedBy.blockedFiles ?? [];
+      const allowed = decision.blockedBy.allowedFiles ?? [];
+      const changed = decision.blockedBy.changedFiles ?? changedFiles ?? [];
+      result.changed_files_count = changed.length;
+      if (changed.length > FILE_TRUNC_THRESHOLD) {
+        result.blocked_files = blocked.slice(0, FILE_LOG_MAX);
+        if (blocked.length > FILE_LOG_MAX) {
+          result.blocked_files_truncated_count = blocked.length - FILE_LOG_MAX;
+        }
+        result.allowed_files = allowed.slice(0, FILE_LOG_MAX);
+        if (allowed.length > FILE_LOG_MAX) {
+          result.allowed_files_truncated_count = allowed.length - FILE_LOG_MAX;
+        }
+      } else {
+        result.blocked_files = blocked;
+        result.allowed_files = allowed;
+      }
       writeLog(result);
       return result;
     }
