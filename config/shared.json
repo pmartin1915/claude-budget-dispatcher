@@ -166,24 +166,8 @@
       "auto_push_allowlist": []
     },
     {
-      "slug": "sprite-forge",
-      "path": "c:/Users/perry/DevProjects/sprite-forge",
-      "clinical_gate": false,
-      "opportunistic_tasks": ["audit", "explore", "clean"],
-      "auto_push": false,
-      "auto_push_allowlist": []
-    },
-    {
       "slug": "medilex",
       "path": "c:/Users/perry/DevProjects/medilex",
-      "clinical_gate": true,
-      "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
-      "auto_push": false,
-      "auto_push_allowlist": []
-    },
-    {
-      "slug": "ecg-wizard-pwa",
-      "path": "c:/Users/perry/DevProjects/ecg-wizard-pwa",
       "clinical_gate": true,
       "opportunistic_tasks": ["test", "typecheck", "audit", "clean"],
       "auto_push": false,
