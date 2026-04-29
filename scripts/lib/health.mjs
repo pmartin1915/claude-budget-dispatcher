@@ -30,6 +30,27 @@ const DEGRADED_THRESHOLD = 3;
 // key to tune this yet."
 const FALLBACK_DEGRADED_THRESHOLD = 3;
 
+// No-progress detector: an opted-in auto-push project that has been cycling
+// for 3 calendar days without a single successful push is a silent failure mode
+// the existing alerting doesn't catch. 3 days is the sweet spot:
+//   - 1 day is too noisy (gating, allowlist churn, or startup warmup periods
+//     are all plausible reasons for a newly-activated project to produce 0 PRs
+//     on day 1).
+//   - 7 days is too late — a week of silent saturation (97 cycles/day × 7 days
+//     = ~679 blocked cycles) is real cost, not background noise.
+//   - 3 days with at least MIN_PUSH_ATTEMPTS push-phase entries means the
+//     mechanism is actively firing on the project yet never succeeding; that
+//     is the targeted signal.
+const NO_PROGRESS_DAYS = 3;
+// Minimum number of push-phase attempts in the window before the no-progress
+// rule fires. Guards against false positives on freshly-opted-in projects
+// (day 1 warmup) or projects with legitimately low cycle activity (e.g. a
+// project that is only in rotation on one machine). With the current 97
+// cycles/day fleet rate, 5 attempts over 3 days requires that the project
+// was eligible on at least 5 cycles — strong signal that dispatching IS
+// happening on this project.
+const MIN_PUSH_ATTEMPTS_FOR_NO_PROGRESS = 5;
+
 // Benign skips: the dispatcher chose not to work (legitimate, not broken).
 // Structural skips: the dispatcher tried to work and broke.
 // IMPORTANT: if you add a new gate skip reason in dispatch.mjs, add it here
@@ -49,6 +70,69 @@ const BENIGN_SKIP_REASONS = new Set([
   "insufficient-history-span",
 ]);
 
+/**
+ * No-progress detector: identifies auto-push projects that have been
+ * dispatching for NO_PROGRESS_DAYS calendar days but never produced a
+ * successful push. Pure function — no I/O.
+ *
+ * Push-phase JSONL entries (written by maybeAutoPush) carry:
+ *   { phase: "auto-push", outcome: "auto-push-success"|"auto-push-blocked"|
+ *     "auto-push-failed"|"auto-push-dry-run", project, ts, ... }
+ *
+ * "Attempt" = any auto-push phase entry (including blocked/failed — these mean
+ * the mechanism ran and tried to push, not just that conditions were skipped
+ * upstream). "auto-push-dry-run" is excluded because dry-run never makes a
+ * real push decision; it is a test-mode artifact.
+ *
+ * @param {object[]} entries - All raw JSONL entries (not filtered to REAL_OUTCOMES).
+ * @param {Date} now - Current time (injected for testability).
+ * @returns {{ stuck: boolean, projects: Array<{project: string, attempts: number,
+ *   pushed_count: number, last_attempt_ts: string|null}> }}
+ */
+export function evaluateNoProgress(entries, now) {
+  const windowStart = new Date(now.getTime() - NO_PROGRESS_DAYS * 24 * 3_600_000);
+
+  // Collect push-phase entries within the window.
+  // Exclude "auto-push-dry-run" — dry-runs never reflect a real push decision.
+  const pushEntries = entries.filter(
+    (e) =>
+      e.phase === "auto-push" &&
+      e.outcome !== "auto-push-dry-run" &&
+      e.ts &&
+      new Date(e.ts) >= windowStart
+  );
+
+  // Group by project.
+  /** @type {Map<string, {attempts: number, pushed_count: number, last_attempt_ts: string|null}>} */
+  const byProject = new Map();
+  for (const e of pushEntries) {
+    const key = e.project ?? "(unknown)";
+    if (!byProject.has(key)) {
+      byProject.set(key, { attempts: 0, pushed_count: 0, last_attempt_ts: null });
+    }
+    const rec = byProject.get(key);
+    rec.attempts++;
+    if (e.outcome === "auto-push-success") rec.pushed_count++;
+    // Keep the most-recent timestamp for reporting.
+    if (!rec.last_attempt_ts || e.ts > rec.last_attempt_ts) {
+      rec.last_attempt_ts = e.ts;
+    }
+  }
+
+  // Find stuck projects: enough attempts to be significant, but zero pushes.
+  const stuckProjects = [];
+  for (const [project, rec] of byProject) {
+    if (rec.attempts >= MIN_PUSH_ATTEMPTS_FOR_NO_PROGRESS && rec.pushed_count === 0) {
+      stuckProjects.push({ project, ...rec });
+    }
+  }
+
+  return {
+    stuck: stuckProjects.length > 0,
+    projects: stuckProjects,
+  };
+}
+
 function parseLines(raw) {
   // Split on LF or CRLF. PowerShell's Add-Content writes CRLF on Windows;
   // JSON.parse tolerates a trailing \r as whitespace (ECMA-404) so the old
@@ -63,7 +147,7 @@ export function computeHealth(logPath) {
   try {
     entries = parseLines(readFileSync(logPath, "utf8"));
   } catch {
-    return { state: "unknown", reason: "log unreadable", last_success_ts: null, consecutive_errors: 0, hours_since_success: null };
+    return { state: "unknown", reason: "log unreadable", last_success_ts: null, consecutive_errors: 0, hours_since_success: null, no_progress_projects: [] };
   }
 
   const real = entries.filter((e) => REAL_OUTCOMES.has(e.outcome));
@@ -161,6 +245,19 @@ export function computeHealth(logPath) {
     reason = `${recentFallbacks} of last ${tail.length} cycles used selector fallback (Gemini quota or auth?)`;
   }
 
+  // No-progress degraded: an opted-in auto-push project that has cycled
+  // for 3+ days without a single successful push is a silent failure mode.
+  // Uses the full `entries` list (not `real`) because push-phase entries have
+  // outcome "auto-push-*", which REAL_OUTCOMES does not include.
+  // Only escalates from healthy — an already-down or degraded state is more
+  // informative and should not be overridden.
+  const noProgressResult = evaluateNoProgress(entries, new Date());
+  if (state === "healthy" && noProgressResult.stuck) {
+    state = "degraded";
+    const first = noProgressResult.projects[0];
+    reason = `no-progress: ${first.project} has 0 pushes in ${first.attempts} attempts over ${NO_PROGRESS_DAYS} days`;
+  }
+
   return {
     state,
     reason,
@@ -176,6 +273,7 @@ export function computeHealth(logPath) {
       message: lastStructuralFailure.error_message ?? null,
       ts: lastStructuralFailure.ts,
     } : null,
+    no_progress_projects: noProgressResult.projects,
     computed_at: new Date().toISOString(),
   };
 }

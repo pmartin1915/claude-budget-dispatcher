@@ -2,7 +2,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeHealth } from "../health.mjs";
+import { computeHealth, evaluateNoProgress } from "../health.mjs";
 import { writeFileSync, mkdtempSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -205,5 +205,181 @@ describe("computeHealth - fallback-rate rule", () => {
     assert.equal(h.state, "degraded");
     assert.equal(h.selector_fallback_count, 6);
     assert.match(h.reason, /selector fallback/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No-progress detector (Bug D): evaluateNoProgress + computeHealth integration.
+//
+// Push-phase JSONL entries have phase:"auto-push" and outcome values outside
+// REAL_OUTCOMES ("auto-push-success", "auto-push-blocked", etc.). They must
+// be visible in the raw entries list passed to evaluateNoProgress.
+// ---------------------------------------------------------------------------
+
+function daysAgo(days) {
+  return new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+}
+
+// Build a push-phase JSONL entry. project + outcome are required; ts defaults
+// to inside the 3-day window.
+function pushEntry(project, outcome, { ts } = {}) {
+  return {
+    phase: "auto-push",
+    engine: "dispatch.mjs",
+    project,
+    outcome,
+    ts: ts ?? daysAgo(1),
+  };
+}
+
+describe("evaluateNoProgress — pure-function unit tests", () => {
+  it("returns stuck:false and empty projects when no push-phase entries exist", () => {
+    const result = evaluateNoProgress([], new Date());
+    assert.equal(result.stuck, false);
+    assert.deepEqual(result.projects, []);
+  });
+
+  it("returns stuck:false when attempts < MIN_PUSH_ATTEMPTS (freshly-opted-in project)", () => {
+    // 4 blocked entries — below the 5-attempt floor; should not fire.
+    const entries = Array.from({ length: 4 }, () =>
+      pushEntry("my-project", "auto-push-blocked")
+    );
+    const result = evaluateNoProgress(entries, new Date());
+    assert.equal(result.stuck, false);
+    assert.deepEqual(result.projects, []);
+  });
+
+  it("returns stuck:true when >= 5 attempts and 0 pushes in 3-day window", () => {
+    const entries = Array.from({ length: 7 }, () =>
+      pushEntry("sandbox-canary-test", "auto-push-blocked")
+    );
+    const result = evaluateNoProgress(entries, new Date());
+    assert.equal(result.stuck, true);
+    assert.equal(result.projects.length, 1);
+    assert.equal(result.projects[0].project, "sandbox-canary-test");
+    assert.equal(result.projects[0].attempts, 7);
+    assert.equal(result.projects[0].pushed_count, 0);
+  });
+
+  it("returns stuck:false when project has >= 1 successful push in the window", () => {
+    const entries = [
+      pushEntry("my-project", "auto-push-blocked"),
+      pushEntry("my-project", "auto-push-blocked"),
+      pushEntry("my-project", "auto-push-blocked"),
+      pushEntry("my-project", "auto-push-blocked"),
+      pushEntry("my-project", "auto-push-success"),  // one success
+      pushEntry("my-project", "auto-push-blocked"),
+    ];
+    const result = evaluateNoProgress(entries, new Date());
+    assert.equal(result.stuck, false);
+    assert.deepEqual(result.projects, []);
+  });
+
+  it("excludes auto-push-dry-run entries from attempt count", () => {
+    // 4 dry-runs + 1 blocked = only 1 real attempt; should not fire.
+    const entries = [
+      ...Array.from({ length: 4 }, () => pushEntry("my-project", "auto-push-dry-run")),
+      pushEntry("my-project", "auto-push-blocked"),
+    ];
+    const result = evaluateNoProgress(entries, new Date());
+    assert.equal(result.stuck, false);
+  });
+
+  it("excludes entries older than 3 calendar days from the window", () => {
+    // 6 blocked entries all older than 3 days — out of window, no stuck signal.
+    const entries = Array.from({ length: 6 }, () =>
+      pushEntry("old-project", "auto-push-blocked", { ts: daysAgo(4) })
+    );
+    const result = evaluateNoProgress(entries, new Date());
+    assert.equal(result.stuck, false);
+  });
+
+  it("reports last_attempt_ts as the most-recent entry timestamp", () => {
+    const olderTs = daysAgo(2);
+    const newerTs = daysAgo(0.5);
+    const entries = [
+      pushEntry("my-project", "auto-push-blocked", { ts: olderTs }),
+      pushEntry("my-project", "auto-push-blocked", { ts: newerTs }),
+      pushEntry("my-project", "auto-push-blocked"),
+      pushEntry("my-project", "auto-push-blocked"),
+      pushEntry("my-project", "auto-push-blocked"),
+    ];
+    const result = evaluateNoProgress(entries, new Date());
+    assert.equal(result.stuck, true);
+    // last_attempt_ts should be the newest timestamp.
+    assert.equal(result.projects[0].last_attempt_ts, newerTs);
+  });
+});
+
+describe("computeHealth — no-progress integration", () => {
+  it("flips to degraded when an opted-in project has >= 5 attempts and 0 pushes in 3 days", () => {
+    // Mix real-outcome entries (healthy: recent success) with push-phase entries
+    // (stuck: 7 blocked attempts on sandbox-canary-test, 0 successes).
+    const log = writeLog([
+      { outcome: "success", ts: ago(1) },
+      ...Array.from({ length: 7 }, () =>
+        pushEntry("sandbox-canary-test", "auto-push-blocked")
+      ),
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "degraded");
+    assert.match(h.reason, /^no-progress:/);
+    assert.match(h.reason, /sandbox-canary-test/);
+    assert.match(h.reason, /0 pushes/);
+    assert.equal(h.no_progress_projects.length, 1);
+    assert.equal(h.no_progress_projects[0].project, "sandbox-canary-test");
+    assert.equal(h.no_progress_projects[0].attempts, 7);
+    assert.equal(h.no_progress_projects[0].pushed_count, 0);
+  });
+
+  it("stays healthy when the same project has at least one push success", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(1) },
+      ...Array.from({ length: 6 }, () =>
+        pushEntry("sandbox-canary-test", "auto-push-blocked")
+      ),
+      pushEntry("sandbox-canary-test", "auto-push-success"),
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "healthy");
+    assert.deepEqual(h.no_progress_projects, []);
+  });
+
+  it("stays healthy when attempts < 5 (freshly-opted-in project, no false positive)", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(1) },
+      ...Array.from({ length: 4 }, () =>
+        pushEntry("new-project", "auto-push-blocked")
+      ),
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "healthy");
+    assert.deepEqual(h.no_progress_projects, []);
+  });
+
+  it("existing down state takes priority over no-progress (no-progress does not override)", () => {
+    // 3 consecutive errors → down. Also has stuck push-phase entries.
+    // The no-progress rule must not flip down → degraded.
+    const log = writeLog([
+      { outcome: "success", ts: ago(2) },
+      { outcome: "error", ts: ago(1.5) },
+      { outcome: "error", ts: ago(1) },
+      { outcome: "error", ts: ago(0.5) },
+      ...Array.from({ length: 7 }, () =>
+        pushEntry("my-project", "auto-push-blocked")
+      ),
+    ]);
+    const h = computeHealth(log);
+    assert.equal(h.state, "down");
+    // no_progress_projects is still populated (informational), but state is down.
+    assert.ok(Array.isArray(h.no_progress_projects));
+  });
+
+  it("returns no_progress_projects as empty array when log is healthy with no push entries", () => {
+    const log = writeLog([
+      { outcome: "success", ts: ago(1) },
+    ]);
+    const h = computeHealth(log);
+    assert.deepEqual(h.no_progress_projects, []);
   });
 });
