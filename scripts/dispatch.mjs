@@ -42,6 +42,7 @@ import { materializeConfig } from "./lib/config.mjs";
 import { maybeAutoPush, createDefaultClients } from "./lib/auto-push.mjs";
 import { runPostMergeMonitor } from "./post-merge-monitor.mjs";
 import { advancePipelineState } from "./lib/pipelines.mjs";
+import { verifyProjectScaffolds } from "./lib/scaffold.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -162,6 +163,23 @@ async function main() {
     // Phase 0 must not crash the dispatcher. Log and continue.
     console.warn(`[dispatch] phase 0 (gate 7) failed: ${e?.message ?? e}`);
     appendLog({ phase: "post-merge-canary", engine: "dispatch.mjs", outcome: "error", reason: "phase-0-uncaught", error: String(e?.message ?? e).slice(-500) });
+  }
+
+  // Phase 0.5: scaffold verification (Bug A defensive observability).
+  // Surfaces the silent skip in context.mjs:56-59 — projects without
+  // DISPATCH.md drop out of selector context with no log surface today.
+  // Emits one `outcome: "scaffold-missing"` JSONL entry per affected
+  // project per cron tick so dashboards / evaluateNoProgress / morning-
+  // briefing can see which rotation projects are dormant due to missing
+  // scaffolds. Runs upstream of gates because the audit trail should be
+  // complete regardless of whether dispatch fires. Fail-soft: never aborts.
+  try {
+    verifyProjectScaffolds({
+      projects: config.projects_in_rotation ?? [],
+      appendLog,
+    });
+  } catch (e) {
+    console.warn(`[dispatch] phase 0.5 (scaffold-check) failed: ${e?.message ?? e}`);
   }
 
   // Phase 1: Gates (0 tokens)
