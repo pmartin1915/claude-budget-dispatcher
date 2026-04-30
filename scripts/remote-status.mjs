@@ -151,15 +151,29 @@ function renderStatus(files) {
     }
   }
 
-  // Budget status (if available and not too stale)
-  if (budgetStatus.state) {
-    console.log("");
-    console.log(thin);
-    console.log("  BUDGET");
-    console.log(thin);
-    console.log(`  Gate:    ${budgetStatus.state}`);
-    if (budgetStatus.reason) console.log(`  Reason:  ${budgetStatus.reason}`);
-    console.log(`  Updated: ${relativeTime(budgetStatus.computed_at)}`);
+  // Fleet Budget (aggregated from per-machine snapshots)
+  console.log("");
+  console.log(thin);
+  console.log("  FLEET BUDGET");
+  console.log(thin);
+
+  let bestSnap = null;
+  for (const m of machines) {
+    if (m.estimator_generated_at && (!bestSnap || m.estimator_generated_at > bestSnap.estimator_generated_at)) {
+      bestSnap = m;
+    }
+  }
+
+  if (bestSnap && bestSnap.weekly_pct !== null) {
+    console.log(`  Weekly:  ${bestSnap.weekly_pct.toFixed(1)}% used (headroom ${bestSnap.weekly_headroom_pct?.toFixed(1)}%)`);
+    console.log(`  Monthly: ${bestSnap.monthly_pct?.toFixed(1)}% used`);
+    console.log(`  Gate:    ${bestSnap.weekly_gate_passes ? "pass" : "fail"} (weekly) / ${bestSnap.monthly_gate_passes ? "pass" : "fail"} (monthly)`);
+    console.log(`  Source:  ${bestSnap.name} (${relativeTime(bestSnap.estimator_generated_at)})`);
+  } else {
+    console.log("  Gate:    unknown (no active estimators checking in)");
+    if (bestSnap?.estimator_skip_reason) {
+      console.log(`  Reason:  ${bestSnap.estimator_skip_reason} (${bestSnap.name})`);
+    }
   }
 
   console.log("");

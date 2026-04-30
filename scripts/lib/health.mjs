@@ -94,10 +94,13 @@ export function evaluateNoProgress(entries, now) {
 
   // Collect push-phase entries within the window.
   // Exclude "auto-push-dry-run" — dry-runs never reflect a real push decision.
+  // Exclude "disabled-project" and "disabled-global" — these are intentional skips.
   const pushEntries = entries.filter(
     (e) =>
       e.phase === "auto-push" &&
       e.outcome !== "auto-push-dry-run" &&
+      e.reason !== "disabled-project" &&
+      e.reason !== "disabled-global" &&
       e.ts &&
       new Date(e.ts) >= windowStart
   );
