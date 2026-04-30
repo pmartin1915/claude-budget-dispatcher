@@ -38,11 +38,14 @@ import { sweepStaleIndexLocks, sweepStaleWorktrees, weeklyGitFsck, weeklyNpmAudi
 import { initThrottle } from "./lib/throttle.mjs";
 import { checkAndAlert } from "./lib/alerting.mjs";
 import { acquireDispatchLock, releaseDispatchLock } from "./lib/gist.mjs";
-import { materializeConfig } from "./lib/config.mjs";
+import { materializeConfig, ConfigDriftError, validateConfigCompleteness } from "./lib/config.mjs";
 import { maybeAutoPush, createDefaultClients } from "./lib/auto-push.mjs";
 import { runPostMergeMonitor } from "./post-merge-monitor.mjs";
 import { advancePipelineState } from "./lib/pipelines.mjs";
 import { verifyProjectScaffolds } from "./lib/scaffold.mjs";
+import { pushConfigDriftAlert } from "./lib/config-drift-alert.mjs";
+import { buildHeartbeatPayload, pushHeartbeat, collectEnvHealth } from "./lib/heartbeat.mjs";
+import { runSentinel } from "./lib/sentinel.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -91,6 +94,26 @@ function loadConfig() {
     }
   }
 
+  // P0-2: Post-schema semantic completeness check.
+  // Catches issues the JSON schema can't express: missing project paths,
+  // empty gist IDs, missing model roster entries. On failure, push a
+  // config-drift alert to the gist before dying so the central dashboard
+  // can see WHY this node stopped.
+  const completeness = validateConfigCompleteness(config);
+  if (!completeness.valid) {
+    const gistId = config.status_gist_id || "";
+    const token = process.env.GIST_AUTH_TOKEN || process.env.GITHUB_TOKEN || "";
+    // Best-effort gist alert — fire-and-forget. We can't await here because
+    // die() throws synchronously. Schedule the alert and let it race with
+    // process exit.
+    pushConfigDriftAlert(gistId, token, completeness.errors, [
+      CONFIG_PATH,
+      resolve(REPO_ROOT, "config", "shared.json"),
+      resolve(REPO_ROOT, "config", "local.json"),
+    ]).catch(() => {});
+    die(`config completeness check failed:\n  ${completeness.errors.join("\n  ")}`);
+  }
+
   return config;
 }
 
@@ -136,6 +159,50 @@ async function main() {
   // Housekeeping: rotate old log entries (R-5)
   rotateLog();
 
+  // Resolve gist auth token once — used by heartbeat, sentinel, and Phase 0.
+  const gistToken = process.env.GIST_AUTH_TOKEN || process.env.GITHUB_TOKEN || "";
+
+  // Phase -1: Heartbeat push (P1-1).
+  // Pushes a signed state snapshot to the status gist so the Sentinel and
+  // watchdog know this node is alive. Runs before gates because a gated
+  // skip is still a sign of life. Jittered to avoid API write collisions
+  // when multiple fleet nodes fire cron simultaneously.
+  // Fail-soft: never aborts dispatch.
+  try {
+    const hbPayload = buildHeartbeatPayload({
+      nodeId: config.node_id ?? hostname().toLowerCase(),
+      machineName: hostname().toLowerCase(),
+      currentTaskHash: null,  // pre-gates: not working yet
+      envHealth: collectEnvHealth(),
+      driftVelocity: null,
+    });
+    await pushHeartbeat(hbPayload, config.status_gist_id, gistToken, {
+      jitterMs: 3000,  // 0-3s jitter for fleet write-collision avoidance
+    });
+  } catch (e) {
+    console.warn(`[dispatch] heartbeat push failed (non-fatal): ${e?.message ?? e}`);
+  }
+
+  // Phase -0.5: Sentinel (P1-2).
+  // Reads heartbeat files from the gist, detects dead nodes (3-miss
+  // threshold), and re-registers orphaned task hashes to the global queue.
+  // Any node can run sentinel duty (stateless via gist). Runs before Phase
+  // 0 so orphaned tasks are available for reallocation before gates.
+  // Fail-soft: never aborts dispatch.
+  try {
+    const sentinelSummary = await runSentinel({
+      gistId: config.status_gist_id,
+      token: gistToken,
+      intervalMs: (config.activity_gate?.idle_minutes_required ?? 20) * 60 * 1000,
+      config,
+    });
+    if (sentinelSummary.deadNodes?.length > 0) {
+      console.log(`[dispatch] sentinel: ${sentinelSummary.deadNodes.length} dead node(s), ${sentinelSummary.orphanedTasks?.length ?? 0} task(s) re-queued`);
+    }
+  } catch (e) {
+    console.warn(`[dispatch] sentinel failed (non-fatal): ${e?.message ?? e}`);
+  }
+
   // Phase 0: post-merge canary monitor (gate 7).
   // Reads pending-merges.json from the status gist, replays canary against
   // any merged commit whose deadline has elapsed (T+15min/1h/4h/24h), and
@@ -155,10 +222,9 @@ async function main() {
     // both fallbacks distinct means each host uses the most-likely-scoped
     // token in its environment without forcing operators to provision a
     // separate GIST_AUTH_TOKEN secret on every host. PAL focus 4 / 2026-04-28.
-    const phase0Token = process.env.GIST_AUTH_TOKEN || process.env.GITHUB_TOKEN || "";
     const phase0Summary = await runPostMergeMonitor({
       gistId: config.status_gist_id,
-      gistToken: phase0Token,
+      gistToken: gistToken,
       projectsInRotation: config.projects_in_rotation ?? [],
       ntfyTopic: config.alerting?.topic ?? null,
       ntfyEnabled: config.alerting?.enabled === true,

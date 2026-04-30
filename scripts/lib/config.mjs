@@ -1,10 +1,32 @@
 // config.mjs — Layered config loader.
 // Merges config/shared.json (committed) + config/local.json (gitignored).
 // Falls back to legacy config/budget.json if shared.json doesn't exist yet.
+//
+// P0-2 hardening (2026-04-30): local.json parse errors now throw
+// ConfigDriftError instead of being silently swallowed. Callers must
+// catch ConfigDriftError and decide whether to die() or degrade.
+// New validateConfigCompleteness() checks post-merge config integrity.
 
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+/**
+ * Thrown when local.json exists but cannot be parsed. Distinct from generic
+ * Error so dispatch.mjs can pattern-match and fire a config-drift Gist
+ * alert before dying.
+ */
+export class ConfigDriftError extends Error {
+  /**
+   * @param {string} message - Human-readable parse error
+   * @param {string} configPath - Absolute path to the offending file
+   */
+  constructor(message, configPath) {
+    super(message);
+    this.name = "ConfigDriftError";
+    this.configPath = configPath;
+  }
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = join(__dirname, "..", "..", "config");
@@ -111,15 +133,47 @@ export function loadConfig() {
     return null;
   }
 
-  // Apply local overrides if present
+  // Apply local overrides if present.
+  // P0-2 hardening: a malformed local.json is a configuration drift event.
+  // We MUST NOT silently continue with shared-only config because the node
+  // would lose its machine-specific routing (project paths, auto_push flags,
+  // machine_name). Throw ConfigDriftError so the caller can die() + alert.
   if (existsSync(LOCAL_PATH)) {
+    let localRaw;
     try {
-      const local = JSON.parse(readFileSync(LOCAL_PATH, "utf8"));
-      deepMerge(shared, local);
+      localRaw = readFileSync(LOCAL_PATH, "utf8");
     } catch (e) {
-      console.error("[config] WARNING: local.json parse error:", e.message);
-      // Continue with shared-only — don't fail
+      throw new ConfigDriftError(
+        `local.json unreadable: ${e.message}`,
+        LOCAL_PATH,
+      );
     }
+    // Empty file is a specific drift vector: JSON.parse("") throws, but
+    // an operator might truncate the file accidentally. Treat as drift.
+    if (localRaw.trim().length === 0) {
+      throw new ConfigDriftError(
+        "local.json is empty (0 bytes after trim)",
+        LOCAL_PATH,
+      );
+    }
+    let local;
+    try {
+      local = JSON.parse(localRaw);
+    } catch (e) {
+      throw new ConfigDriftError(
+        `local.json parse error: ${e.message}`,
+        LOCAL_PATH,
+      );
+    }
+    // An empty object {} is technically valid JSON but operationally
+    // dangerous: the node inherits shared.json's project paths verbatim
+    // (which are hard-coded to the primary machine's filesystem). Warn
+    // but do not throw — an operator might intentionally use {} to test
+    // with shared-only config.
+    if (typeof local === "object" && local !== null && Object.keys(local).length === 0) {
+      console.warn("[config] WARNING: local.json is an empty object {}; using shared.json values only");
+    }
+    deepMerge(shared, local);
   }
 
   return shared;
@@ -184,6 +238,55 @@ export function materializeConfig() {
     writeFileSync(LEGACY_PATH, JSON.stringify(config, null, 2) + "\n", "utf8");
   }
   return config;
+}
+
+/**
+ * Post-merge config completeness check. Pure function — only I/O is
+ * existsSync on project paths. Call AFTER loadConfig() + AJV schema
+ * validation to catch semantic issues the schema can't express.
+ *
+ * @param {object} config - Merged config from loadConfig()
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+export function validateConfigCompleteness(config) {
+  const errors = [];
+
+  // 1. status_gist_id must be non-empty (heartbeat, lock, watchdog all depend on it).
+  if (!config?.status_gist_id || typeof config.status_gist_id !== "string" || config.status_gist_id.trim().length === 0) {
+    errors.push("status_gist_id is missing or empty");
+  }
+
+  // 2. projects_in_rotation: every entry must have slug + path, and path must exist.
+  const projects = config?.projects_in_rotation;
+  if (!Array.isArray(projects) || projects.length === 0) {
+    errors.push("projects_in_rotation is missing or empty");
+  } else {
+    for (let i = 0; i < projects.length; i++) {
+      const p = projects[i];
+      if (!p?.slug || typeof p.slug !== "string") {
+        errors.push(`projects_in_rotation[${i}]: missing slug`);
+        continue;
+      }
+      if (!p?.path || typeof p.path !== "string") {
+        errors.push(`projects_in_rotation[${i}] (${p.slug}): missing path`);
+      } else if (!existsSync(p.path)) {
+        errors.push(`projects_in_rotation[${i}] (${p.slug}): path does not exist: ${p.path}`);
+      }
+    }
+  }
+
+  // 3. free_model_roster: at least one provider class must be configured.
+  const roster = config?.free_model_roster;
+  if (!roster || typeof roster !== "object") {
+    errors.push("free_model_roster is missing");
+  } else {
+    const classes = roster.classes;
+    if (!classes || typeof classes !== "object" || Object.keys(classes).length === 0) {
+      errors.push("free_model_roster.classes is missing or empty");
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 export {
