@@ -44,6 +44,8 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Octokit } from "@octokit/rest";
+import { throttling } from "@octokit/plugin-throttling";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // BUDGET_DISPATCH_STATUS_DIR overrides the default for tests. runCli falls
@@ -370,15 +372,6 @@ function defaultAppender(entry) {
 // log-and-skip outcomes.
 // ---------------------------------------------------------------------------
 
-function ghHeaders(token) {
-  const h = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": USER_AGENT,
-  };
-  if (token) h.Authorization = `Bearer ${token}`;
-  return h;
-}
-
 class GitHubError extends Error {
   constructor(message, status, body) {
     super(message);
@@ -387,141 +380,123 @@ class GitHubError extends Error {
   }
 }
 
-async function ghFetch(url, opts = {}, { token, accept } = {}) {
-  const headers = ghHeaders(token);
-  if (accept) headers.Accept = accept;
-  const res = await fetch(url, {
-    ...opts,
-    headers: { ...headers, ...(opts.headers ?? {}) },
-    signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new GitHubError(`GitHub ${res.status} ${res.statusText} on ${url}`, res.status, body.slice(0, 500));
-  }
-  return res;
-}
-
-/**
- * Build the "<owner>/<repo>" path segment with each piece URL-encoded
- * separately. Defense-in-depth: the schema constrains repo format to
- * `^[^/]+/[^/]+$`, but OVERSEER_REPOS env var bypasses schema validation,
- * so a malformed env value (e.g. with a `?` or `#`) could otherwise inject
- * URL syntax into the API path.
- */
-function repoPath(repo) {
-  const [owner, name, ...rest] = String(repo).split("/");
-  if (!owner || !name || rest.length > 0) {
-    throw new Error(`invalid repo "${repo}": expected "owner/name"`);
-  }
-  return `${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
-}
-
 export function createDefaultGitHubClient(token) {
+  const ThrottledOctokit = Octokit.plugin(throttling);
+  const octokit = new ThrottledOctokit({
+    auth: token,
+    userAgent: USER_AGENT,
+    throttle: {
+      onRateLimit: (retryAfter, options, octokit, retryCount) => {
+        octokit.log.warn(`Request quota exhausted for request ${options.method} ${options.url}`);
+        if (retryCount < 1) {
+          octokit.log.info(`Retrying after ${retryAfter} seconds!`);
+          return true;
+        }
+      },
+      onSecondaryRateLimit: (retryAfter, options, octokit) => {
+        octokit.log.warn(`Secondary rate limit hit for ${options.method} ${options.url}`);
+        return true;
+      },
+    },
+  });
+
+  const catchOctokitError = (e) => {
+    throw new GitHubError(e.message, e.status, JSON.stringify(e.response?.data));
+  };
+
   return {
     async listOpenDispatcherActionablePrs(repo) {
-      const url = `https://api.github.com/repos/${repoPath(repo)}/pulls?state=open&per_page=${MAX_PRS_PER_REPO}`;
-      const res = await ghFetch(url, {}, { token });
-      const all = await res.json();
-      // Action lattice: drafts (gate 5 review + gate 6 ready-flip) OR ready
-      // PRs that the bot itself flipped (gate 6 merge). The
-      // overseer:ready-flipped sentinel is the gate that prevents grabbing
-      // unrelated human-flipped ready PRs that happen to carry
-      // dispatcher:auto. Filter is applied client-side because the /pulls
-      // endpoint doesn't support label filtering directly.
-      return all.filter((pr) => {
-        if (!Array.isArray(pr?.labels)) return false;
-        const names = pr.labels.map((l) => l?.name);
-        if (!names.includes("dispatcher:auto")) return false;
-        return pr.draft === true || names.includes("overseer:ready-flipped");
-      });
+      const [owner, name] = String(repo).split("/");
+      try {
+        const res = await octokit.rest.pulls.list({ owner, repo: name, state: "open", per_page: MAX_PRS_PER_REPO });
+        const all = res.data;
+        return all.filter((pr) => {
+          if (!Array.isArray(pr?.labels)) return false;
+          const names = pr.labels.map((l) => typeof l === "string" ? l : l?.name);
+          if (!names.includes("dispatcher:auto")) return false;
+          return pr.draft === true || names.includes("overseer:ready-flipped");
+        });
+      } catch (e) { catchOctokitError(e); }
     },
     async getPrDiff(repo, prNumber) {
-      const url = `https://api.github.com/repos/${repoPath(repo)}/pulls/${encodeURIComponent(prNumber)}`;
-      const res = await ghFetch(url, {}, { token, accept: "application/vnd.github.v3.diff" });
-      return res.text();
+      const [owner, name] = String(repo).split("/");
+      try {
+        const res = await octokit.rest.pulls.get({
+          owner, repo: name, pull_number: prNumber, mediaType: { format: "diff" }
+        });
+        return String(res.data);
+      } catch (e) { catchOctokitError(e); }
     },
     async getHeadCommit(repo, sha) {
-      const url = `https://api.github.com/repos/${repoPath(repo)}/commits/${encodeURIComponent(sha)}`;
-      const res = await ghFetch(url, {}, { token });
-      return res.json();
+      const [owner, name] = String(repo).split("/");
+      try {
+        const res = await octokit.rest.repos.getCommit({ owner, repo: name, ref: sha });
+        return res.data;
+      } catch (e) { catchOctokitError(e); }
     },
     async getIssueEvents(repo, prNumber) {
-      const url = `https://api.github.com/repos/${repoPath(repo)}/issues/${encodeURIComponent(prNumber)}/events?per_page=100`;
-      const res = await ghFetch(url, {}, { token });
-      return res.json();
+      const [owner, name] = String(repo).split("/");
+      try {
+        const res = await octokit.rest.issues.listEvents({ owner, repo: name, issue_number: prNumber, per_page: 100 });
+        return res.data;
+      } catch (e) { catchOctokitError(e); }
     },
     async addLabel(repo, prNumber, label) {
-      const url = `https://api.github.com/repos/${repoPath(repo)}/issues/${encodeURIComponent(prNumber)}/labels`;
-      await ghFetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ labels: [label] }),
-      }, { token });
+      const [owner, name] = String(repo).split("/");
+      try {
+        await octokit.rest.issues.addLabels({ owner, repo: name, issue_number: prNumber, labels: [label] });
+      } catch (e) { catchOctokitError(e); }
     },
     async removeLabel(repo, prNumber, label) {
-      // 404 here is fine (label wasn't on the PR); caller swallows it.
-      const url = `https://api.github.com/repos/${repoPath(repo)}/issues/${encodeURIComponent(prNumber)}/labels/${encodeURIComponent(label)}`;
-      await ghFetch(url, { method: "DELETE" }, { token });
+      const [owner, name] = String(repo).split("/");
+      try {
+        await octokit.rest.issues.removeLabel({ owner, repo: name, issue_number: prNumber, name: label });
+      } catch (e) {
+        if (e.status !== 404) catchOctokitError(e);
+      }
     },
-    // ---- Gate 6 extensions ---------------------------------------------------
     async listIssueComments(repo, prNumber, sinceIso) {
-      // PR review comments live at /pulls/{n}/comments and reviews at
-      // /pulls/{n}/reviews. v1 only checks /issues/{n}/comments because
-      // ad-hoc text replies are the dominant human-interrupt signal.
-      const since = sinceIso ? `&since=${encodeURIComponent(sinceIso)}` : "";
-      const url = `https://api.github.com/repos/${repoPath(repo)}/issues/${encodeURIComponent(prNumber)}/comments?per_page=100${since}`;
-      const res = await ghFetch(url, {}, { token });
-      return res.json();
+      const [owner, name] = String(repo).split("/");
+      const opts = { owner, repo: name, issue_number: prNumber, per_page: 100 };
+      if (sinceIso) opts.since = sinceIso;
+      try {
+        const res = await octokit.rest.issues.listComments(opts);
+        return res.data;
+      } catch (e) { catchOctokitError(e); }
     },
     async setReady(repo, prNumber) {
-      // GitHub REST does NOT accept `draft` as a body param on PATCH /pulls
-      // (silently no-ops, as Bug A in the 2026-04-26 smoke proved). Use
-      // GraphQL markPullRequestReadyForReview, which requires the PR's
-      // node_id (only retrievable via REST /pulls/{n}). Two-call sequence:
-      //   1. REST GET /pulls/{n} -> read .node_id
-      //   2. POST /graphql with the mutation
-      // Idempotent on already-ready PRs (mutation returns isDraft:false
-      // either way; we assert the post-state to detect future silent
-      // failures like the one this fix is replacing).
-      const detailUrl = `https://api.github.com/repos/${repoPath(repo)}/pulls/${encodeURIComponent(prNumber)}`;
-      const detailRes = await ghFetch(detailUrl, {}, { token });
-      const detail = await detailRes.json();
-      const nodeId = detail?.node_id;
-      if (!nodeId) {
-        throw new GitHubError("setReady: missing node_id from REST detail", 0, _trail(JSON.stringify(detail)));
-      }
-      const gqlBody = {
-        query: "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}",
-        variables: { id: nodeId },
-      };
-      const gqlRes = await ghFetch("https://api.github.com/graphql", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(gqlBody),
-      }, { token });
-      const gqlJson = await gqlRes.json();
-      if (Array.isArray(gqlJson?.errors) && gqlJson.errors.length > 0) {
-        throw new GitHubError(`setReady graphql: ${_trail(JSON.stringify(gqlJson.errors))}`, gqlRes.status, _trail(JSON.stringify(gqlJson)));
-      }
-      const isDraft = gqlJson?.data?.markPullRequestReadyForReview?.pullRequest?.isDraft;
-      if (isDraft !== false) {
-        throw new GitHubError("setReady graphql: PR still draft after mutation", 0, _trail(JSON.stringify(gqlJson)));
+      const [owner, name] = String(repo).split("/");
+      let nodeId;
+      try {
+        const detailRes = await octokit.rest.pulls.get({ owner, repo: name, pull_number: prNumber });
+        nodeId = detailRes.data?.node_id;
+        if (!nodeId) {
+          throw new GitHubError("setReady: missing node_id from REST detail", 0, _trail(JSON.stringify(detailRes.data)));
+        }
+      } catch (e) { catchOctokitError(e); }
+
+      try {
+        const gqlRes = await octokit.graphql({
+          query: "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}",
+          id: nodeId,
+        });
+        const isDraft = gqlRes?.markPullRequestReadyForReview?.pullRequest?.isDraft;
+        if (isDraft !== false) {
+          throw new GitHubError("setReady graphql: PR still draft after mutation", 0, _trail(JSON.stringify(gqlRes)));
+        }
+      } catch (e) {
+        if (e instanceof GitHubError) throw e;
+        throw new GitHubError(`setReady graphql: ${_trail(JSON.stringify(e.errors || e.message))}`, e.status || 0, _trail(JSON.stringify(e)));
       }
     },
     async mergePr(repo, prNumber, { mergeMethod, sha }) {
-      // PUT /repos/{owner}/{repo}/pulls/{n}/merge -- IMMEDIATE merge.
-      // Passing `sha` makes GitHub refuse to merge if HEAD has advanced (415).
-      // Returns { sha, merged, message } on success.
-      const body = { merge_method: mergeMethod };
-      if (sha) body.sha = sha;
-      const url = `https://api.github.com/repos/${repoPath(repo)}/pulls/${encodeURIComponent(prNumber)}/merge`;
-      const res = await ghFetch(url, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }, { token });
-      return res.json();
+      const [owner, name] = String(repo).split("/");
+      const opts = { owner, repo: name, pull_number: prNumber, merge_method: mergeMethod };
+      if (sha) opts.sha = sha;
+      try {
+        const res = await octokit.rest.pulls.merge(opts);
+        return res.data;
+      } catch (e) { catchOctokitError(e); }
     },
   };
 }

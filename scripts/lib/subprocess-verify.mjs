@@ -264,7 +264,7 @@ export async function verifiedExec({
     verificationFailures++;
   }
 
-  // All attempts exhausted — verification never succeeded.
+    // All attempts exhausted — verification never succeeded.
   return {
     verified: false,
     ...lastResult,
@@ -273,4 +273,68 @@ export async function verifiedExec({
     stdout_tail: trail(lastResult?.stdout ?? ""),
     stderr_tail: trail(lastResult?.stderr ?? ""),
   };
+}
+
+/**
+ * P0-1 Hardening: Localized IPC Watchdog Timer.
+ * Prevents infinite silent stalls when waiting for an IPC response from a child process
+ * (e.g. child_process.fork()) that may have crashed out-of-band or deadlocked.
+ * 
+ * @param {import("node:child_process").ChildProcess} child - The child process with an IPC channel.
+ * @param {any} message - The message payload to send via IPC.
+ * @param {number} [watchdogMs=5000] - Timeout in milliseconds before rejecting the promise.
+ * @returns {Promise<any>} A promise that resolves with the first received IPC message.
+ */
+export function sendIpcWithWatchdog(child, message, watchdogMs = 5000) {
+  return new Promise((resolve, reject) => {
+    if (!child || typeof child.send !== "function") {
+      return reject(new Error("Child process does not have an active IPC channel."));
+    }
+
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.removeListener("message", onMsg);
+      child.removeListener("exit", onExit);
+      child.removeListener("error", onError);
+      child.removeListener("disconnect", onDisconnect);
+    };
+
+    const onMsg = (m) => {
+      cleanup();
+      resolve(m);
+    };
+
+    const onExit = (code, signal) => {
+      cleanup();
+      reject(new Error(`IPC failed: child process exited with code ${code} signal ${signal}`));
+    };
+
+    const onError = (err) => {
+      cleanup();
+      reject(new Error(`IPC failed: child process error: ${err.message}`));
+    };
+
+    const onDisconnect = () => {
+      cleanup();
+      reject(new Error("IPC failed: child process disconnected out-of-band"));
+    };
+
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`IPC watchdog timeout: silent stall detected after ${watchdogMs}ms`));
+    }, watchdogMs);
+
+    child.on("message", onMsg);
+    child.on("exit", onExit);
+    child.on("error", onError);
+    child.on("disconnect", onDisconnect);
+
+    child.send(message, (err) => {
+      if (err) {
+        cleanup();
+        reject(err);
+      }
+    });
+  });
 }
