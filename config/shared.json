@@ -17,13 +17,19 @@
   "$comment_overseer": "Pillar 1 steps 3+4 (worldbuilder/VEYDRIA-VISION.md). Gates 5+6 of the seven-gate stack. Gate 5: read-only Overseer labels draft PRs. Gate 6: when auto_merge:true at BOTH top-level and per-repo, after cooling_off_minutes the bot flips ready and merges. Mechanism stays dormant: top-level auto_merge:false default, all repos default auto_merge:false in their object entries (or are bare strings, which are read-only). Operator opts in by setting enabled:true, listing repos with auto_merge:true objects, and flipping top-level auto_merge:true. See docs/OVERSEER.md and docs/AUTO-MERGE.md.",
   "overseer": {
     "enabled": true,
-    "repos": ["pmartin1915/extra-sub-standalone-canary-test"],
+    "repos": [
+      {
+        "repo": "pmartin1915/extra-sub-standalone-canary-test",
+        "auto_merge": true,
+        "project_slug": "sandbox-canary-test"
+      }
+    ],
     "review_model": "gemini-2.5-pro",
     "max_diff_chars": 50000,
     "abstain_below_confidence": "medium"
   },
   "$comment_auto_merge": "Pillar 1 step 4 -- gate 6 fleet kill switch. Top-level auto_merge:false keeps the mechanism dormant fleet-wide regardless of any per-repo opt-ins. cooling_off_minutes is the wait between overseer:approved and the bot's ready-flip; default 45. cooling_off_minutes_after_ready (default 0) is the wait between ready-flip and the merge call. post_merge_canary_replay_schedule_min is gate 7's replay cadence in MINUTES (T+15m/1h/4h/24h).",
-  "auto_merge": false,
+  "auto_merge": true,
   "cooling_off_minutes": 45,
   "cooling_off_minutes_after_ready": 0,
   "post_merge_canary_replay_schedule_min": [15, 60, 240, 1440],
@@ -110,7 +116,7 @@
       "path": "c:/Users/perry/DevProjects/burn-wizard",
       "clinical_gate": true,
       "opportunistic_tasks": ["test", "typecheck", "audit", "coverage", "clean", "lint"],
-      "auto_push": false,
+      "auto_push": true,
       "auto_push_allowlist": []
     },
     {
