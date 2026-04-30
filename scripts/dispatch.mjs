@@ -98,13 +98,20 @@ function initClients() {
   const geminiKey = process.env.GEMINI_API_KEY;
   const mistralKey = process.env.MISTRAL_API_KEY;
 
-  if (!geminiKey) die("GEMINI_API_KEY environment variable is required");
-  if (!mistralKey) die("MISTRAL_API_KEY environment variable is required");
+  const clients = {};
+  if (geminiKey) {
+    clients.gemini = new GoogleGenAI({ apiKey: geminiKey });
+  } else {
+    console.warn("[dispatch] GEMINI_API_KEY not set; Gemini tasks will be skipped");
+  }
 
-  return {
-    gemini: new GoogleGenAI({ apiKey: geminiKey }),
-    mistral: new Mistral({ apiKey: mistralKey }),
-  };
+  if (mistralKey) {
+    clients.mistral = new Mistral({ apiKey: mistralKey });
+  } else {
+    console.warn("[dispatch] MISTRAL_API_KEY not set; Mistral/Codestral tasks will be skipped");
+  }
+
+  return clients;
 }
 
 async function main() {

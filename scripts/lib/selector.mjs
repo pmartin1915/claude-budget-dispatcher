@@ -348,6 +348,17 @@ export async function selectProjectAndTask(config, clients) {
   // model (Gemini 2.5-pro audit, 2026-04-24).
   const initialPrompt = buildSelectorPrompt(selectorContexts, diversityHint);
   let prompt = initialPrompt;
+
+  // 4. LLM Selection or Deterministic Fallback (if key missing)
+  if (!clients.gemini) {
+    const fb = deterministicFallback(selectorContexts, "gemini_key_missing");
+    if (fb) {
+      console.warn("[selector] GEMINI_API_KEY missing, using deterministic fallback");
+      return fb;
+    }
+    return { error: { reason: "gemini_key_missing", detail: "no GEMINI_API_KEY and no viable fallback contexts" } };
+  }
+
   // Default to gemini-2.5-flash: (1) supports thinkingBudget: 0 (pro does not,
   // rejects with INVALID_ARGUMENT), (2) better free-tier rate limits, (3) less
   // subject to pro's high-demand 503 spikes. Selector task is structured

@@ -91,6 +91,9 @@ export async function callProvider(clients, providerConfig, model, prompt) {
 
   switch (provider) {
     case "gemini": {
+      if (!clients.gemini) {
+        throw new Error(`provider "gemini" requires GEMINI_API_KEY environment variable`);
+      }
       const r = await withTimeout(
         clients.gemini.models.generateContent({
           model: apiModel,
@@ -104,6 +107,9 @@ export async function callProvider(clients, providerConfig, model, prompt) {
     }
 
     case "mistral": {
+      if (!clients.mistral) {
+        throw new Error(`provider "mistral" requires MISTRAL_API_KEY environment variable`);
+      }
       const r = await withTimeout(
         clients.mistral.chat.complete({
           model: apiModel,
