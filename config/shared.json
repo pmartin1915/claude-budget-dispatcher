@@ -19,7 +19,7 @@
     "enabled": true,
     "repos": [
       {
-        "repo": "pmartin1915/extra-sub-standalone-canary-test",
+        "owner_repo": "pmartin1915/extra-sub-standalone-canary-test",
         "auto_merge": true,
         "project_slug": "sandbox-canary-test"
       }
