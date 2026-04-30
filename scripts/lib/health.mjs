@@ -195,10 +195,10 @@ export function computeHealth(logPath) {
     (e) => isBenignSkipOrDryRun(e) || e.outcome === "success"
   );
 
-  // Find the most recent structural failure for the alert body
+  // Find the most recent structural failure OR error for the alert body
   let lastStructuralFailure = null;
   for (let i = real.length - 1; i >= 0; i--) {
-    if (isStructuralSkip(real[i])) {
+    if (real[i].outcome === "error" || isStructuralSkip(real[i])) {
       lastStructuralFailure = real[i];
       break;
     }
