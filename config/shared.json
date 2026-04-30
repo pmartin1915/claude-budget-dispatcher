@@ -45,7 +45,7 @@
 
   "trailing30_baseline": {
     "resets_on_day": 1,
-    "target_burn_pct_per_day": 2.5,
+    "target_burn_pct_per_day": 5.0,
     "reserve_floor_pct": 15,
     "trigger_headroom_pct": 5
   },
@@ -60,8 +60,8 @@
       "resets_on_day_of_week": 4,
       "resets_at_hour_utc": 19,
       "ramp_steps": [
-        { "hours_before_reset": 48, "reserve_floor_pct": 10, "max_runs_per_day": 24, "max_pct_per_run": 1.5 },
-        { "hours_before_reset": 24, "reserve_floor_pct": 5,  "max_runs_per_day": 36, "max_pct_per_run": 2.0 }
+        { "hours_before_reset": 48, "reserve_floor_pct": 10, "max_runs_per_day": 100, "max_pct_per_run": 1.5 },
+        { "hours_before_reset": 24, "reserve_floor_pct": 5,  "max_runs_per_day": 150, "max_pct_per_run": 2.0 }
       ],
       "hard_minimum_reserve_pct": 5,
       "interactive_reserve_hours": 4
@@ -70,13 +70,11 @@
 
   "max_opportunistic_pct_per_run": 1.0,
   "_max_runs_per_day_rationale": "Per-machine daily cap, primarily a runaway/circuit-breaker for the Node engine (which uses free-tier Gemini/Mistral, not Claude Max). Real binding constraint is per-key Gemini Pro RPD (~50/day free tier) — when that's exhausted, the C2 fallback chain (DECISIONS.md 2026-04-14, commit af1071f) routes selector calls to Flash and Mistral, so dispatches still complete. The dashboard surfaces selector_fallback_count + degraded state when fallback rate climbs. 96 = one per 15 min if every cycle could fire — effectively uncapped during normal operation while still bounded enough to catch a runaway loop.",
-  "max_runs_per_day": 96,
-
+  "max_runs_per_day": 200,
   "activity_gate": {
     "idle_minutes_required": 20,
     "no_fixed_hours": true
   },
-
   "free_model_roster": {
     "enabled": true,
     "allow_only_listed_models": true,
@@ -117,7 +115,7 @@
       "clinical_gate": true,
       "opportunistic_tasks": ["test", "typecheck", "audit", "coverage", "clean", "lint"],
       "auto_push": true,
-      "auto_push_allowlist": []
+      "auto_push_allowlist": ["docs/**"]
     },
     {
       "slug": "wilderness",
