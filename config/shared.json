@@ -199,6 +199,8 @@
       "auto_push": true,
       "auto_push_allowlist": ["docs/smoke-runs/**"],
       "canary_command": ["npm.cmd", "test"],
+      "canary_success_markers": ["passing|tests? passed|ok"],
+      "canary_max_retries": 1,
       "canary_timeout_ms": 60000
     }
   ]
