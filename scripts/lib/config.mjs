@@ -267,6 +267,10 @@ export function validateConfigCompleteness(config) {
         errors.push(`projects_in_rotation[${i}]: missing slug`);
         continue;
       }
+      // Skip path check for projects explicitly disabled on this machine.
+      // local.json can override a shared.json entry with {slug, disabled:true}
+      // to exclude it from a machine that doesn't have the repo checked out.
+      if (p.disabled === true) continue;
       if (!p?.path || typeof p.path !== "string") {
         errors.push(`projects_in_rotation[${i}] (${p.slug}): missing path`);
       } else if (!existsSync(p.path)) {
