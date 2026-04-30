@@ -395,6 +395,17 @@
             "minimum": 1000,
             "maximum": 600000,
             "description": "Hard timeout for canary_command in milliseconds. Default 120000 (2 min) when absent. On timeout, the process tree is killed via taskkill /T /F (Windows) or SIGKILL on the process group (POSIX) and the push is blocked with reason='canary-failed', failure_mode='timeout'."
+          },
+          "canary_success_markers": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Regex source strings matched against combined stdout+stderr. When present, the canary uses verifiedExec (3-step dispatch→wait→verify). Exit code 0 is NOT sufficient: at least one marker must match. When absent, exit code 0 alone is sufficient (legacy behavior). Example: [\"passing|tests? passed|ok\"]."
+          },
+          "canary_max_retries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5,
+            "description": "Number of retries when canary exits 0 but no success marker matches. Default 1. Only meaningful when canary_success_markers is populated. Non-zero exit, timeout, and spawn-error are never retried."
           }
         }
       }

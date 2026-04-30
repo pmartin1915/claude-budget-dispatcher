@@ -711,6 +711,48 @@ describe("evaluateCanary()", () => {
       ["a", "b", "c"]
     );
   });
+
+  it("extracts successMarkers from canary_success_markers (regex source strings -> RegExp[]) and defaults maxRetries=1", () => {
+    const cfg = evaluateCanary({
+      canary_command: ["npm.cmd", "test"],
+      canary_success_markers: ["passing|tests? passed", "ok"],
+    });
+    assert.equal(cfg.successMarkers.length, 2);
+    assert.ok(cfg.successMarkers[0] instanceof RegExp);
+    // Default case-insensitive flag.
+    assert.ok(cfg.successMarkers[0].flags.includes("i"));
+    // Test the compiled regex actually matches.
+    assert.ok(cfg.successMarkers[0].test("12 tests passed"));
+    assert.ok(cfg.successMarkers[1].test("OK"));
+    // Default maxRetries.
+    assert.equal(cfg.maxRetries, 1);
+  });
+
+  it("respects canary_max_retries; silently skips invalid regex sources; empty markers array -> empty successMarkers", () => {
+    // Custom retries.
+    const cfg1 = evaluateCanary({
+      canary_command: ["a"],
+      canary_max_retries: 3,
+      canary_success_markers: ["ok"],
+    });
+    assert.equal(cfg1.maxRetries, 3);
+    // Invalid regex source (unbalanced parenthesis) silently skipped.
+    const cfg2 = evaluateCanary({
+      canary_command: ["a"],
+      canary_success_markers: ["valid", "("],
+    });
+    assert.equal(cfg2.successMarkers.length, 1);
+    assert.ok(cfg2.successMarkers[0].test("valid"));
+    // Empty markers array -> empty successMarkers (legacy path).
+    const cfg3 = evaluateCanary({
+      canary_command: ["a"],
+      canary_success_markers: [],
+    });
+    assert.equal(cfg3.successMarkers.length, 0);
+    // No markers field at all -> empty successMarkers (legacy path).
+    const cfg4 = evaluateCanary({ canary_command: ["a"] });
+    assert.equal(cfg4.successMarkers.length, 0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -787,5 +829,103 @@ describe("FALLBACK_PROTECTED_GLOBS", () => {
 
   it("is frozen so accidental mutation throws (in strict mode) or no-ops", () => {
     assert.equal(Object.isFrozen(FALLBACK_PROTECTED_GLOBS), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maybeAutoPush() verified canary (P0-1 wiring) -- 3 tests
+// ---------------------------------------------------------------------------
+
+describe("maybeAutoPush() verified canary (P0-1 wiring)", () => {
+  it("canary_success_markers present + markers found in output -> push proceeds (verified=true)", async () => {
+    const args = baseHappyArgs();
+    // Configure success markers on the project.
+    args.projectConfig.canary_command = ["node", "-e", "console.log('all 5 tests passed')"];
+    args.projectConfig.canary_success_markers = ["tests? passed"];
+    args.projectConfig.canary_max_retries = 0;
+    // verifiedExec spawns real subprocesses, so workingDir must exist.
+    args.workingDir = process.cwd();
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh({ url: "https://github.com/test/repo/pull/99" });
+    const log = mockLogger();
+    // Note: canaryRunner is NOT used when markers are present -- verifiedExec runs directly.
+    // We still pass a runner to verify it's NOT called.
+    const runner = mockRunner({ exitCode: 0 });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-success");
+    assert.equal(result.pr_url, "https://github.com/test/repo/pull/99");
+    // Legacy runner was bypassed -- verifiedExec ran directly.
+    assert.equal(runner.calls.length, 0);
+    assert.equal(git.pushCalls.length, 1);
+    assert.equal(gh.createCalls.length, 1);
+  });
+
+  it("canary_success_markers present + markers NOT in output -> blocked/canary-failed with failure_mode=markers-not-found", async () => {
+    const args = baseHappyArgs();
+    // Command exits 0 but prints output that doesn't match the marker.
+    args.projectConfig.canary_command = ["node", "-e", "console.log('done')"];
+    args.projectConfig.canary_success_markers = ["NEVER_MATCH_THIS_MARKER"];
+    args.projectConfig.canary_max_retries = 0; // No retries -- fail immediately.
+    // verifiedExec spawns real subprocesses, so workingDir must exist.
+    args.workingDir = process.cwd();
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh();
+    const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0 });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-blocked");
+    assert.equal(result.reason, "canary-failed");
+    assert.equal(result.failure_mode, "markers-not-found");
+    assert.equal(result.verified, false);
+    assert.equal(typeof result.verification_failures, "number");
+    assert.equal(typeof result.attempts, "number");
+    // No git/gh side effects.
+    assert.equal(git.pushCalls.length, 0);
+    assert.equal(gh.createCalls.length, 0);
+    // Legacy runner bypassed.
+    assert.equal(runner.calls.length, 0);
+    // Log entry carries verified canary fields.
+    const entry = log.calls[0];
+    assert.equal(entry.failure_mode, "markers-not-found");
+    assert.equal(entry.verified, false);
+  });
+
+  it("no canary_success_markers -> legacy path via canaryRunner (regression guard, verified field absent)", async () => {
+    const args = baseHappyArgs();
+    // No markers -> legacy path.
+    args.projectConfig.canary_command = ["echo", "ok"];
+    delete args.projectConfig.canary_success_markers;
+    const git = mockGit({ files: ["src/a.js"] });
+    const gh = mockGh({ url: "https://github.com/test/repo/pull/1" });
+    const log = mockLogger();
+    const runner = mockRunner({ exitCode: 0 });
+    const result = await maybeAutoPush({
+      ...args,
+      gitClient: git,
+      ghClient: gh,
+      canaryRunner: runner.fn,
+      logger: log,
+      fs: mockFs(),
+    });
+    assert.equal(result.outcome, "auto-push-success");
+    // Legacy runner WAS used.
+    assert.equal(runner.calls.length, 1);
+    assert.deepEqual(runner.calls[0].command, ["echo", "ok"]);
+    assert.equal(git.pushCalls.length, 1);
+    assert.equal(gh.createCalls.length, 1);
   });
 });

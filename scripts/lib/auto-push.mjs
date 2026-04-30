@@ -34,6 +34,7 @@ import {
 } from "node:fs";
 import { resolve as nodeResolve } from "node:path";
 import { tmpdir } from "node:os";
+import { verifiedExec } from "./subprocess-verify.mjs";
 
 // Default canary timeout when projectConfig.canary_timeout_ms is absent.
 // 2 minutes covers typical npm-test-style smoke runs without letting a
@@ -217,11 +218,16 @@ export function evaluatePathFirewall({ changedFiles, allowlist, protectedGlobs }
 
 /**
  * Pure. Resolve the canary configuration for an opted-in project.
- * Returns { command, timeoutMs } when canary_command is a non-empty array,
- * else null (caller decides whether null = block or allow).
+ * Returns { command, timeoutMs, successMarkers, maxRetries } when
+ * canary_command is a non-empty array, else null (caller decides
+ * whether null = block or allow).
+ *
+ * When canary_success_markers is populated, the canary runner uses
+ * verifiedExec (3-step dispatch→wait→verify) instead of raw spawn.
+ * This adds output-marker verification on top of the exit-code check.
  *
  * @param {object} projectConfig
- * @returns {{ command: string[], timeoutMs: number } | null}
+ * @returns {{ command: string[], timeoutMs: number, successMarkers: RegExp[], maxRetries: number } | null}
  */
 export function evaluateCanary(projectConfig) {
   const command = projectConfig?.canary_command;
@@ -231,7 +237,29 @@ export function evaluateCanary(projectConfig) {
   }
   const raw = projectConfig?.canary_timeout_ms;
   const timeoutMs = Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_CANARY_TIMEOUT_MS;
-  return { command, timeoutMs };
+
+  // P0-1 wiring: optional success markers for verifiedExec.
+  // Array of regex source strings from config → compiled RegExp[]. Invalid
+  // regex sources are silently skipped (defense in depth: a bad regex in
+  // config should not crash the canary gate).
+  const markersRaw = projectConfig?.canary_success_markers;
+  const successMarkers = [];
+  if (Array.isArray(markersRaw)) {
+    for (const src of markersRaw) {
+      if (typeof src !== "string" || src.length === 0) continue;
+      try {
+        successMarkers.push(new RegExp(src, "i"));
+      } catch {
+        // Invalid regex source — skip. Operator will notice via canary logs
+        // (markers array is shorter than config array).
+      }
+    }
+  }
+
+  const retriesRaw = projectConfig?.canary_max_retries;
+  const maxRetries = Number.isInteger(retriesRaw) && retriesRaw >= 0 ? retriesRaw : 1;
+
+  return { command, timeoutMs, successMarkers, maxRetries };
 }
 
 /**
@@ -617,12 +645,45 @@ export async function maybeAutoPush({
       return result;
     }
 
-    // Run the canary in the worktree. Runner is process-tree-safe per R-2 and
-    // never throws -- it returns a structured shape on every path (clean exit,
-    // non-zero exit, timeout, spawn-error). Defensive guard: if no runner was
-    // injected, treat as spawn-error so the push is blocked rather than skipped.
+    // Run the canary in the worktree. Two execution paths:
+    //
+    //   (a) No successMarkers configured → legacy path via injected canaryRunner
+    //       (process-tree-safe per R-2, checks exit code only).
+    //
+    //   (b) successMarkers populated → verifiedExec from subprocess-verify.mjs
+    //       (3-step dispatch→wait→verify: exit code + output marker check +
+    //       retry on verification failure). The injected canaryRunner is
+    //       bypassed because verifiedExec manages its own spawn lifecycle.
+    //
+    // Defensive guard: if no runner was injected AND no markers configured,
+    // treat as spawn-error so the push is blocked rather than skipped.
     let canaryResult;
-    if (typeof canaryRunner !== "function") {
+    const useVerifiedExec = canaryConfig.successMarkers.length > 0;
+
+    if (useVerifiedExec) {
+      // P0-1: verified canary path with output marker validation.
+      try {
+        canaryResult = await verifiedExec({
+          command: canaryConfig.command,
+          cwd: workingDir,
+          successMarkers: canaryConfig.successMarkers,
+          timeoutMs: canaryConfig.timeoutMs,
+          maxRetries: canaryConfig.maxRetries,
+        });
+      } catch (e) {
+        canaryResult = {
+          exitCode: null,
+          stdout: "",
+          stderr: String(e?.message ?? e),
+          timedOut: false,
+          durationMs: 0,
+          spawnError: true,
+          verified: false,
+          verificationFailures: 0,
+          attempts: 0,
+        };
+      }
+    } else if (typeof canaryRunner !== "function") {
       canaryResult = {
         exitCode: null,
         stdout: "",
@@ -648,16 +709,22 @@ export async function maybeAutoPush({
       }
     }
 
-    const canaryFailed =
-      canaryResult.timedOut === true ||
-      canaryResult.spawnError === true ||
-      canaryResult.exitCode !== 0;
+    // Unified failure detection. For verified canary: verified===false is
+    // the primary signal (covers marker-missing AND hard failures). For
+    // legacy canary: exit code + timeout + spawn error.
+    const canaryFailed = useVerifiedExec
+      ? canaryResult.verified !== true
+      : (canaryResult.timedOut === true ||
+         canaryResult.spawnError === true ||
+         canaryResult.exitCode !== 0);
 
     if (canaryFailed) {
       const failure_mode = canaryResult.timedOut
         ? "timeout"
         : canaryResult.spawnError
         ? "spawn-error"
+        : useVerifiedExec && canaryResult.exitCode === 0
+        ? "markers-not-found"
         : "non-zero";
       const result = {
         outcome: "auto-push-blocked",
@@ -667,9 +734,15 @@ export async function maybeAutoPush({
         exit_code: canaryResult.exitCode ?? null,
         timedOut: canaryResult.timedOut === true,
         duration_ms: canaryResult.durationMs ?? 0,
-        stdout_tail: _trail(canaryResult.stdout),
-        stderr_tail: _trail(canaryResult.stderr),
+        stdout_tail: _trail(canaryResult.stdout ?? canaryResult.stdout_tail),
+        stderr_tail: _trail(canaryResult.stderr ?? canaryResult.stderr_tail),
       };
+      // Verified canary fields (only present when useVerifiedExec=true).
+      if (useVerifiedExec) {
+        result.verified = canaryResult.verified === true;
+        result.verification_failures = canaryResult.verificationFailures ?? 0;
+        result.attempts = canaryResult.attempts ?? 0;
+      }
       writeLog(result);
       return result;
     }
