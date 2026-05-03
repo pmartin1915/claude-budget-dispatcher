@@ -739,6 +739,8 @@ async function callModelWithFallback(clients, providerConfig, candidates, prompt
             /\b(429|50[0-9]|51[0-9]|52[0-9]|53[0-9])\b/.test(msg) ||
             /timed out/i.test(msg);
 
+        const isSkipCandidate = isTransient || status === 401 || status === 403 || /api_key|API_KEY|requires .* environment variable/i.test(msg);
+
         if (isTransient && attempt < MAX_RETRIES) {
           // C4.1: Exponential backoff before retrying same model
           const backoffMs = 1000 * Math.pow(2, attempt); // 1s, 2s
@@ -746,12 +748,12 @@ async function callModelWithFallback(clients, providerConfig, candidates, prompt
           await new Promise((r) => setTimeout(r, backoffMs));
           continue;
         }
-        if (isTransient) {
-          // Exhausted retries for this candidate, try next
-          console.warn(`[worker] ${model} exhausted ${MAX_RETRIES + 1} attempts, trying next candidate`);
+        if (isSkipCandidate) {
+          // Exhausted retries, or auth/missing key error — try next candidate
+          console.warn(`[worker] ${model} failed (${status || msg}), trying next candidate`);
           break;
         }
-        // Non-retryable (4xx auth, parse errors) — don't try other candidates
+        // Non-retryable (parse errors, bad requests) — don't try other candidates
         throw e;
       }
     }
