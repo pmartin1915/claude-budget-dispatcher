@@ -707,8 +707,9 @@ async function callModelThrottled(clients, providerConfig, model, prompt) {
 
 /**
  * Try calling each candidate model in order until one succeeds (C-5).
- * Falls back to the next candidate on 429 (rate-limit) or 5xx (server error).
- * Non-retryable errors (4xx, parse, timeout) fail immediately.
+ * Falls back to the next candidate on 429/5xx (transient), 401/403 (auth/missing key),
+ * or messages matching api_key/requires-env-var patterns.
+ * Non-retryable errors (e.g. 400 bad request, parse errors) throw immediately.
  * Uses the provider abstraction for multi-provider support.
  * @param {{ gemini: object, mistral: object }} clients
  * @param {object} providerConfig - free_model_roster.providers from budget.json
