@@ -36,7 +36,7 @@ import { createWorktree, restoreOrigin, verifyAndCommit } from "./lib/verify-com
 import { appendLog, writeLastRun, rotateLog } from "./lib/log.mjs";
 import { sweepStaleIndexLocks, sweepStaleWorktrees, weeklyGitFsck, weeklyNpmAudit } from "./lib/git-lock.mjs";
 import { initThrottle } from "./lib/throttle.mjs";
-import { checkAndAlert } from "./lib/alerting.mjs";
+import { checkAndAlert, sendNtfy } from "./lib/alerting.mjs";
 import { acquireDispatchLock, releaseDispatchLock } from "./lib/gist.mjs";
 import { materializeConfig, ConfigDriftError, validateConfigCompleteness } from "./lib/config.mjs";
 import { maybeAutoPush, createDefaultClients } from "./lib/auto-push.mjs";
@@ -236,6 +236,33 @@ async function main() {
     // Phase 0 must not crash the dispatcher. Log and continue.
     console.warn(`[dispatch] phase 0 (gate 7) failed: ${e?.message ?? e}`);
     appendLog({ phase: "post-merge-canary", engine: "dispatch.mjs", outcome: "error", reason: "phase-0-uncaught", error: String(e?.message ?? e).slice(-500) });
+  }
+
+  // Phase 0.1: Semantic drift check (M4 — soft alert, no halt, 30-day empirical window).
+  // Fail-soft: model not found, ONNX error, or empty log all skip gracefully.
+  // Dynamic import isolates the onnxruntime-node dependency — dispatch continues
+  // if drift-engine-cli.mjs is absent or onnxruntime-node is not installed.
+  try {
+    const { runDriftCheck } = await import("./lib/drift-engine-cli.mjs");
+    const driftStatePath = resolve(REPO_ROOT, "status", "drift-state.json");
+    const driftModelPath = resolve(REPO_ROOT, "models", "model_qint8_avx512_vnni.onnx");
+    const driftLogPath = resolve(REPO_ROOT, "status", "budget-dispatch-log.jsonl");
+    const driftResult = await runDriftCheck({
+      logPath: driftLogPath,
+      statePath: driftStatePath,
+      modelPath: driftModelPath,
+      config,
+    });
+    if (driftResult.tripped) {
+      console.warn(`[dispatch] M4 drift alert: cosine distance ${driftResult.distance.toFixed(4)} > threshold 0.15`);
+      appendLog({ phase: "drift-check", outcome: "drift-alert", distance: driftResult.distance, trip_count: driftResult.trip_count, ts: new Date().toISOString() });
+      const topic = config.alerting?.topic;
+      if (config.alerting?.enabled && topic) {
+        await sendNtfy(topic, "[dispatch] Semantic drift detected", `D=${driftResult.distance.toFixed(4)} trip_count=${driftResult.trip_count}`, 3);
+      }
+    }
+  } catch (e) {
+    console.warn(`[dispatch] drift check failed (non-fatal): ${e?.message ?? e}`);
   }
 
   // Phase 0.5: scaffold verification (Bug A defensive observability).
