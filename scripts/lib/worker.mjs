@@ -272,6 +272,18 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, pro
 
   const parsedFiles = parseFileOutput(generatedText);
   if (!parsedFiles || parsedFiles.length === 0) {
+    try {
+      const diagnosticPath = resolve(process.cwd(), "status", "last-malformed-output.json");
+      const payload = {
+        ts: new Date().toISOString(),
+        model: usedModel ?? null,
+        task: task ?? null,
+        project: projectConfig?.slug ?? null,
+        generatedText: (generatedText || "").slice(0, 4096),
+        generatedTextLength: (generatedText || "").length,
+      };
+      writeFileSync(diagnosticPath, JSON.stringify(payload, null, 2));
+    } catch { /* fail-soft */ }
     return { outcome: "error", reason: "malformed-worker-output" };
   }
 
