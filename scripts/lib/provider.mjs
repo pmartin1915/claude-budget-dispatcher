@@ -1,14 +1,15 @@
 // provider.mjs — Unified model calling across multiple providers.
 //
-// Supports 5 provider families:
+// Supports 6 provider families:
 //   - gemini:     Google GenAI SDK (existing)
 //   - mistral:    Mistral SDK (existing, also handles codestral/devstral)
 //   - groq:       OpenAI-compatible REST (Groq Cloud)
 //   - openrouter: OpenAI-compatible REST (OpenRouter)
 //   - ollama:     OpenAI-compatible REST (local, no auth)
+//   - deepseek:   OpenAI-compatible REST (DeepSeek API, metered pay-per-token tier 3)
 //
-// New providers (groq, openrouter, ollama) use fetch against OpenAI-compat
-// /v1/chat/completions endpoints — zero new npm dependencies.
+// REST-based providers (groq, openrouter, ollama, deepseek) use fetch against
+// OpenAI-compat /v1/chat/completions endpoints — zero new npm dependencies.
 
 import { withTimeout, API_TIMEOUT_MS } from "./throttle.mjs";
 
@@ -19,6 +20,7 @@ const DEFAULT_PROVIDERS = {
   groq:       { base_url: "https://api.groq.com/openai/v1",  env_key: "GROQ_API_KEY",       timeout_ms: 30_000 },
   openrouter: { base_url: "https://openrouter.ai/api/v1",    env_key: "OPENROUTER_API_KEY",  timeout_ms: 60_000 },
   ollama:     { base_url: "http://localhost:11434/v1",        env_key: null,                  timeout_ms: 10_000 },
+  deepseek:   { base_url: "https://api.deepseek.com/v1",     env_key: "DEEPSEEK_API_KEY",   timeout_ms: 60_000 },
 };
 
 /**
@@ -36,13 +38,14 @@ function getProviderTimeout(providerConfig, provider) {
 /**
  * Determine which provider family a model belongs to.
  * @param {string} model
- * @returns {"gemini"|"mistral"|"groq"|"openrouter"|"ollama"}
+ * @returns {"gemini"|"mistral"|"groq"|"openrouter"|"ollama"|"deepseek"}
  */
 export function providerFor(model) {
   if (model.startsWith("gemini")) return "gemini";
   if (model.startsWith("local/")) return "ollama";
   if (model.startsWith("groq/")) return "groq";
   if (model.startsWith("openrouter/")) return "openrouter";
+  if (model.startsWith("deepseek/")) return "deepseek";
   // Everything else: mistral SDK (covers codestral-*, mistral-*, devstral-*)
   return "mistral";
 }
@@ -68,7 +71,7 @@ function stripPrefix(model) {
   const slashIdx = model.indexOf("/");
   if (slashIdx === -1) return model;
   const prefix = model.slice(0, slashIdx);
-  if (["local", "groq", "openrouter"].includes(prefix)) {
+  if (["local", "groq", "openrouter", "deepseek"].includes(prefix)) {
     return model.slice(slashIdx + 1);
   }
   return model;
@@ -125,7 +128,8 @@ export async function callProvider(clients, providerConfig, model, prompt) {
 
     case "groq":
     case "openrouter":
-    case "ollama": {
+    case "ollama":
+    case "deepseek": {
       const cfg = providerConfig?.[provider] ?? DEFAULT_PROVIDERS[provider];
       if (!cfg?.base_url) {
         throw new Error(`provider "${provider}" has no base_url configured`);
@@ -144,7 +148,7 @@ export async function callProvider(clients, providerConfig, model, prompt) {
 
 /**
  * Call an OpenAI-compatible /v1/chat/completions endpoint.
- * Works for Groq, OpenRouter, and Ollama (localhost).
+ * Works for Groq, OpenRouter, Ollama (localhost), and DeepSeek.
  * @param {string} baseUrl - e.g. "https://api.groq.com/openai/v1"
  * @param {string|null} apiKey - Bearer token (null for local/no-auth)
  * @param {string} model - Model name as the API expects it

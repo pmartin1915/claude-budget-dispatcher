@@ -33,6 +33,11 @@ describe("providerFor", () => {
     assert.equal(providerFor("openrouter/nous-hermes"), "openrouter");
   });
 
+  it("routes deepseek/* models to deepseek", () => {
+    assert.equal(providerFor("deepseek/deepseek-v4-flash"), "deepseek");
+    assert.equal(providerFor("deepseek/deepseek-v4-pro"), "deepseek");
+  });
+
   it("routes everything else to mistral", () => {
     assert.equal(providerFor("codestral-latest"), "mistral");
     assert.equal(providerFor("mistral-large-latest"), "mistral");
@@ -61,6 +66,7 @@ describe("isLocalModel", () => {
     assert.equal(isLocalModel("mistral-large-latest"), false);
     assert.equal(isLocalModel("groq/llama-3.3-70b"), false);
     assert.equal(isLocalModel("openrouter/minimax-m2.5"), false);
+    assert.equal(isLocalModel("deepseek/deepseek-v4-flash"), false);
   });
 
   it("returns false for empty string", () => {
