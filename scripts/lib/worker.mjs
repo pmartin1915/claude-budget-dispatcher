@@ -40,6 +40,19 @@ export function getSafeTestEnv() {
 }
 
 /**
+ * Selects the model used for the autofix pass after first-pass parse failure.
+ * The pinning rule (use the same model that generated the code) is correct for
+ * Gemini-generated code, but codestral autofix output is unreliable (truncation
+ * and/or markdown-header format drift per evidence captured 2026-05-05 on PC +
+ * Downstairs status/last-malformed-output.json files; see combo/ai/DECISIONS.md
+ * "model-role-axis" 2026-05-05). When usedModel matches ^codestral, substitute
+ * mistral-large-latest. Pin preserved for all other model families.
+ */
+export function chooseAutofixModel(usedModel) {
+  return /^codestral/i.test(usedModel ?? "") ? "mistral-large-latest" : usedModel;
+}
+
+/**
  * Verify that `candidate` resolves (after symlink canonicalization) inside `base`.
  * Defeats: symlink escapes (S-3), prefix-substring match (e.g. "/foo/bar" vs
  * "/foo/bar-evil"), Windows case-insensitivity (S-4), and Windows reserved
@@ -310,13 +323,20 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, pro
     // One retry with error context
     const fixPrompt = buildFixPrompt(task, files, parsedFiles, testResult.stderr);
     try {
-      // Pin fix step to the model that generated the code (don't restart fallback walk)
-      const fixedText = await callModelThrottled(clients, providerConfig, usedModel, fixPrompt);
+      // Pin fix step to the model that generated the code (don't restart fallback walk),
+      // EXCEPT when usedModel is codestral (see chooseAutofixModel JSDoc above).
+      const autofixModel = chooseAutofixModel(usedModel);
+      if (autofixModel !== usedModel) {
+        console.warn(`[worker] autofix-model-override: ${usedModel} -> ${autofixModel} (codestral-autofix-substitute)`);
+      }
+      const fixedText = await callModelThrottled(clients, providerConfig, autofixModel, fixPrompt);
       const fixedFiles = parseFileOutput(fixedText);
       if (!fixedFiles || fixedFiles.length === 0) {
         // T1-A coverage: fix-parse-failed (autofix-pass parse, zero blocks)
-        // Captures: usedModel + task + project + fixedText (4KB tail) + length
+        // Captures: usedModel + task + project + fixedText (4KB tail) + length + autofix_model_override
         // Writes: status/last-malformed-output.json (intentional overwrite -- most recent event is most actionable)
+        // model field preserves usedModel (the original gen model) so future analyses can still see
+        // what triggered the autofix. autofix_model_override.to is the model that produced fixedText.
         try {
           const diagnosticPath = resolve(process.cwd(), "status", "last-malformed-output.json");
           const payload = {
@@ -327,6 +347,9 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, pro
             generatedText: (fixedText || "").slice(0, 4096),
             generatedTextLength: (fixedText || "").length,
             phase: "fix-parse-failed",
+            autofix_model_override: autofixModel !== usedModel
+              ? { from: usedModel, to: autofixModel, reason: "codestral-autofix-substitute" }
+              : null,
           };
           writeFileSync(diagnosticPath, JSON.stringify(payload, null, 2));
         } catch { /* fail-soft */ }

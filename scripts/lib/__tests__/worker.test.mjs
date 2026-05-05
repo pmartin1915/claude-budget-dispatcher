@@ -3,7 +3,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isPathInside, getSafeTestEnv } from "../worker.mjs";
+import { isPathInside, getSafeTestEnv, chooseAutofixModel } from "../worker.mjs";
 import { resolve, sep } from "node:path";
 import { mkdtempSync, writeFileSync, symlinkSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -128,5 +128,36 @@ describe("getSafeTestEnv", () => {
       if (orig !== undefined) process.env.npm_config_cache = orig;
       else delete process.env.npm_config_cache;
     }
+  });
+});
+
+describe("chooseAutofixModel", () => {
+  it("substitutes mistral-large-latest when usedModel is codestral-latest", () => {
+    assert.equal(chooseAutofixModel("codestral-latest"), "mistral-large-latest");
+  });
+
+  it("preserves pin when usedModel is gemini-2.5-pro", () => {
+    assert.equal(chooseAutofixModel("gemini-2.5-pro"), "gemini-2.5-pro");
+  });
+
+  it("preserves pin when usedModel is mistral-large-latest (no double-substitute)", () => {
+    assert.equal(chooseAutofixModel("mistral-large-latest"), "mistral-large-latest");
+  });
+
+  it("is case-insensitive across codestral variants", () => {
+    assert.equal(chooseAutofixModel("Codestral-Latest"), "mistral-large-latest");
+    assert.equal(chooseAutofixModel("CODESTRAL-LATEST"), "mistral-large-latest");
+    assert.equal(chooseAutofixModel("codestral-2405"), "mistral-large-latest");
+  });
+
+  it("does not substitute models that contain 'codestral' but do not start with it", () => {
+    // Defensive: regex anchors to start-of-string so "my-codestral-fork" pins through.
+    assert.equal(chooseAutofixModel("my-codestral-fork"), "my-codestral-fork");
+  });
+
+  it("handles null and undefined usedModel without throwing", () => {
+    // Defensive: real callers always supply usedModel, but guard against null/undefined.
+    assert.equal(chooseAutofixModel(null), null);
+    assert.equal(chooseAutofixModel(undefined), undefined);
   });
 });
