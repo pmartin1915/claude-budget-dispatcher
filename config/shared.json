@@ -196,7 +196,7 @@
       "sandbox": true,
       "canary": true,
       "opportunistic_tasks": ["test", "audit", "clean", "docs-gen"],
-      "auto_push": true,
+      "auto_push": false,
       "auto_push_allowlist": ["docs/smoke-runs/**"],
       "canary_command": ["npm.cmd", "test"],
       "canary_success_markers": ["passing|tests? pass(?:ed)?|ok"],
