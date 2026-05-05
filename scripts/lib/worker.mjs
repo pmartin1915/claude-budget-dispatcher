@@ -272,6 +272,9 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, pro
 
   const parsedFiles = parseFileOutput(generatedText);
   if (!parsedFiles || parsedFiles.length === 0) {
+    // T1-A coverage: malformed-worker-output (first-pass parse, zero blocks)
+    // Captures: usedModel + task + project + generatedText (4KB tail) + length
+    // Writes: status/last-malformed-output.json (overwritten by fix-parse-failed writer below)
     try {
       const diagnosticPath = resolve(process.cwd(), "status", "last-malformed-output.json");
       const payload = {
@@ -311,6 +314,22 @@ async function executeCodegenTask(task, projectPath, projectConfig, clients, pro
       const fixedText = await callModelThrottled(clients, providerConfig, usedModel, fixPrompt);
       const fixedFiles = parseFileOutput(fixedText);
       if (!fixedFiles || fixedFiles.length === 0) {
+        // T1-A coverage: fix-parse-failed (autofix-pass parse, zero blocks)
+        // Captures: usedModel + task + project + fixedText (4KB tail) + length
+        // Writes: status/last-malformed-output.json (intentional overwrite -- most recent event is most actionable)
+        try {
+          const diagnosticPath = resolve(process.cwd(), "status", "last-malformed-output.json");
+          const payload = {
+            ts: new Date().toISOString(),
+            model: usedModel ?? null,
+            task: task ?? null,
+            project: projectConfig?.slug ?? null,
+            generatedText: (fixedText || "").slice(0, 4096),
+            generatedTextLength: (fixedText || "").length,
+            phase: "fix-parse-failed",
+          };
+          writeFileSync(diagnosticPath, JSON.stringify(payload, null, 2));
+        } catch { /* fail-soft */ }
         revertChanges(projectPath);
         return { outcome: "reverted", reason: "fix-parse-failed" };
       }
