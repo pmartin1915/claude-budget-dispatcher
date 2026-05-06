@@ -8,7 +8,9 @@
 | New contributor coming in cold | ~30 min full | [§3 Seven-gate stack](#3--the-seven-gate-auto-merge-stack-headline-section) |
 | Operator triaging an alert | ~5 min direct | [§10 Operator workflows](#10--operator-workflows-common-scenarios) |
 
-**Reference state:** combo `4b765dc` · claude-budget-dispatcher `1a91073` · worldbuilder `03e9160` · dated 2026-05-03.
+**Reference state:** combo `06241bb` · claude-budget-dispatcher `dc8004c` · worldbuilder `3b45a15` · dated 2026-05-06.
+
+> **What's changed since the 2026-05-03 ship:** Phase 2 ADR decisions recorded (M4+H1+H7+H2 adopted as first-ship set; M3/H4/H5-full deferred per cross-synthesis META-LESSON). M4 wave 1 (drift detector) **code shipped** 2026-05-03 late-night (runtime dormant pending ONNX model download). Fix #1 (T1-A forensics writer) shipped 2026-05-04 + Fix #2 (codestral-as-autofix substitute, dispatcher `dc8004c`) shipped 2026-05-05. Rounds 1-14 of the post-fallback follow-ups monitoring arc closed; verdict on Fix #2 verification: outcome (c) holds 3rd consecutive round (substitute mechanism dormant-but-ready; no codestral-fallback fix-parse-failed events captured post-`dc8004c`). B3 volatility cycle 8-rounds-confirmed and operator-canonicalized as permanent operational behavior. See [§7 status snapshot](#status-snapshot-2026-05-06) below.
 
 ---
 
@@ -336,7 +338,35 @@ Source: [docs/research/HARDENING-PHASE-2-synthesis-2026-05-03.md](research/HARDE
 
 Per both syntheses' downstream-actions sequencing: **M4 (drift detector) + H1 (AST entropy) + H7 (Sentinel extensions) + H2 (mutation testing)** as the smallest-risk-surface Phase 2 first-ship set (four items). M4 ships with soft-alert trip action for first 30 days (provisional threshold tuning); promote to hard-halt once false-positive rate is empirically characterized.
 
-**Awaiting operator decision.** Implementation work is bounded by the recommended-downstream-actions sequencing in each synthesis. This doc surfaces pointers; the syntheses + DECISIONS entries are canonical.
+### Status snapshot (2026-05-06)
+
+Operator decisions recorded 2026-05-03 evening at [`combo/docs/proposals/PHASE-2-ADR-DECISIONS-2026-05-03.md`](../../combo/docs/proposals/PHASE-2-ADR-DECISIONS-2026-05-03.md). All decisions matched synthesis recommendations.
+
+| ADR | Decision | Implementation status |
+|---|---|---|
+| **M4** drift detector | ADOPTED, wave 1 | **Code shipped 2026-05-03** late-night (`drift-engine.mjs` + `drift-engine-cli.mjs` + 28 unit tests + Phase 0.1 wiring + ONNX A3 hardening). **Runtime dormant** — needs Perry to download ONNX model to `claude-budget-dispatcher/models/model_qint8_avx512_vnni.onnx`. Soft-alert trip action only for first 30 days. |
+| **H1** AST entropy | ADOPTED, wave 2 | Not started. Paste-ready Sonnet prompt at [`PHASE-2-ADR-DECISIONS-2026-05-03.md`](../../combo/docs/proposals/PHASE-2-ADR-DECISIONS-2026-05-03.md). Sequenced after 30 days M4 soft-alert signal. |
+| **H7** Sentinel upgrade | ADOPTED, wave 2 (parallel with H1) | Not started. Independent of H1 per HARDENING-PHASE-2 ROADMAP. |
+| **H2** mutation testing | ADOPTED, wave 3 | Not started. Layers on H1 parser; sequenced after H1 lands. |
+| H5 interim path-a' | ADOPTED, wave 4 (adopted-but-not-first-ship) | Not started. Bisection-only; explicitly does NOT auto-synthesize hotfix. |
+| M1, M2, M3, M5, M6 | Deferred | Trigger conditions in DECISIONS entry. M5 lifts when first rotation project flips `auto_merge:true`. |
+| H3, H4, H6 | Deferred | H3 conditional on H4. H4+H5-full+M3 collectively gated on M4 + metacognition A1 4-state ACB shipping first. H6 deferred to Phase 3+ or indefinitely. |
+
+**Adjacent operational state (post-Phase-2-ship monitoring arc):**
+
+- **Fix #1** (T1-A forensics writer extension at `worker.mjs:315` `fix-parse-failed` return path) — shipped 2026-05-04 (dispatcher commit `2914424`). Captures `fixedText` + `usedModel` for diagnostic forensics on autofix-pass parse failures.
+- **Fix #2** (codestral-as-autofix substitute) — shipped 2026-05-05 (dispatcher commit `dc8004c`). When `usedModel` matches `^codestral` (case-insensitive), substitute `mistral-large-latest` for the autofix call. JSDoc + JSONL `autofix_model_override` field for observability.
+- **Verification status (Rounds 12-14):** outcome (c) — substitute mechanism dormant but ready; zero codestral-fallback `fix-parse-failed` events captured in 36+h post-`dc8004c` window. Round 15 = 4-consecutive-round escalation threshold; if (c) still holds, operator-decision queued on whether to canonicalize the verification window as indeterminate.
+- **`selector_fallback_count` oscillation 3-rounds-confirmed (5 → 3 → 4 across R12/R13/R14):** Gemini quota partially-recovering-and-re-exhausting dynamically; load-bearing operational pattern.
+- **B3 volatility cycle 8-rounds-confirmed (Rounds 6/7/9/10/11/12/13/14):** rolling-window prune+re-add on `sandbox-canary-test` + `sandbox-workflow-enhancement`. Operator chose **leave-as-is at Round 14**; cycle is now permanently operational behavior, not a problem requiring fix.
+
+**Implementation gates next:**
+
+1. **Item: download M4 ONNX model.** Single Perry-hands-on step. Unblocks M4 runtime + starts the 30-day empirical-characterization window.
+2. **Item: first real rotation project opt-in.** Recommended: `sandbox-workflow-enhancement`. Validates Pillar 1 path-firewall design under real free-tier-LLM load before any clinical opt-in. After ~3 clean cycles, opt-in expands.
+3. **Wave 2 (H1+H7) launch:** triggers after 30 days of M4 soft-alert observation. Earliest: ~2026-06-05.
+4. **Wave 3 (H2) launch:** after H1 lands.
+5. **Wave 4 (H5 interim) launch:** after H2 stabilizes.
 
 ---
 
